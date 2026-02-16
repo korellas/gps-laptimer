@@ -22,24 +22,25 @@
     <button class="btn btn-secondary hidden" id="disconnectBtn">Disconnect</button>
 </div>
 
-<!-- Latest Release -->
+<!-- Latest Release (auto-fetched from GitHub) -->
 <div class="card hidden" id="releaseCard">
     <div class="card-title">Latest Release</div>
     <div class="info-row"><span class="label">Version</span><span class="value" id="releaseVer">--</span></div>
     <div class="info-row"><span class="label">Date</span><span class="value" id="releaseDate">--</span></div>
     <div class="info-row"><span class="label">Size</span><span class="value" id="releaseSize">--</span></div>
-    <button class="btn btn-secondary" id="downloadBtn" disabled style="margin-top:8px">Download</button>
+    <div class="file-info" id="releaseStatus">Checking...</div>
 </div>
 
-<!-- Firmware Source -->
+<!-- Update -->
 <div class="card">
     <div class="card-title">Firmware</div>
-    <label style="display:block;margin-bottom:8px;color:#888;font-size:12px">Select local .bin file:</label>
-    <input type="file" id="fileInput" accept=".bin">
     <div class="file-info" id="fileInfo"></div>
-    <button class="btn" id="startBtn" disabled style="margin-top:10px">Start Update</button>
+    <button class="btn" id="startBtn" disabled style="margin-top:4px">Loading firmware...</button>
     <button class="btn btn-secondary hidden" id="abortBtn" style="margin-top:6px">Abort</button>
     <div class="warn">Do not disconnect power during update!</div>
+    <hr class="separator">
+    <label style="display:block;margin-bottom:8px;color:#666;font-size:11px">Or select a local .bin file:</label>
+    <input type="file" id="fileInput" accept=".bin">
 </div>
 
 <!-- Progress -->

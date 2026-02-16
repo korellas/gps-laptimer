@@ -1,0 +1,6 @@
+#ifndef COMPONENTS_WAVESHARE_DISPLAY_H
+#define COMPONENTS_WAVESHARE_DISPLAY_H
+
+#include "../main/waveshare_display.h"
+
+#endif // COMPONENTS_WAVESHARE_DISPLAY_H

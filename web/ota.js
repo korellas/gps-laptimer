@@ -45,10 +45,9 @@ const $releaseCard   = document.getElementById('releaseCard');
 const $releaseVer    = document.getElementById('releaseVer');
 const $releaseDate   = document.getElementById('releaseDate');
 const $releaseSize   = document.getElementById('releaseSize');
-const $downloadBtn   = document.getElementById('downloadBtn');
+const $releaseStatus = document.getElementById('releaseStatus');
 const $fileInput     = document.getElementById('fileInput');
 const $fileInfo      = document.getElementById('fileInfo');
-const $uploadBtn     = document.getElementById('uploadBtn');
 const $startBtn      = document.getElementById('startBtn');
 const $progressCard  = document.getElementById('progressCard');
 const $progressFill  = document.getElementById('progressFill');
@@ -69,7 +68,8 @@ let dataChar  = null;
 let statChar  = null;
 let firmware  = null;   // ArrayBuffer
 let firmwareName = '';
-let releaseAsset = null; // { url, name, size }
+let releaseVersion = '';
+let deviceVersion = '';
 let transferring = false;
 let startTime = 0;
 
@@ -132,6 +132,7 @@ function onDisconnected() {
     ctrlChar = null;
     dataChar = null;
     statChar = null;
+    deviceVersion = '';
     if (transferring) {
         transferring = false;
         showResult('Connection lost during transfer', true);
@@ -143,7 +144,26 @@ function setConnected(connected) {
     $statusText.textContent = connected ? 'Connected' : 'Disconnected';
     $connectBtn.classList.toggle('hidden', connected);
     $disconnectBtn.classList.toggle('hidden', !connected);
-    $startBtn.disabled = !connected || !firmware;
+    updateStartButton();
+}
+
+function updateStartButton() {
+    var ready = ctrlChar && firmware;
+    $startBtn.disabled = !ready;
+    if (firmware && releaseVersion) {
+        if (deviceVersion && deviceVersion === releaseVersion) {
+            $startBtn.textContent = 'Already up to date (' + deviceVersion + ')';
+            $startBtn.disabled = true;
+        } else if (deviceVersion) {
+            $startBtn.textContent = 'Update ' + deviceVersion + ' → ' + releaseVersion;
+        } else {
+            $startBtn.textContent = 'Update to ' + releaseVersion;
+        }
+    } else if (firmware) {
+        $startBtn.textContent = 'Start Update';
+    } else {
+        $startBtn.textContent = 'Loading firmware...';
+    }
 }
 
 // --- Status Notification ---
@@ -164,8 +184,10 @@ function onStatusNotify(event) {
     }
 
     if (version && state === STATE_IDLE) {
+        deviceVersion = version;
         $devVersion.textContent = version;
         log('Device version: ' + version);
+        updateStartButton();
     }
 
     if (state === STATE_RECEIVING) {
@@ -226,7 +248,8 @@ function onFileSelect() {
     reader.onload = function () {
         firmware = reader.result;
         firmwareName = file.name;
-        $startBtn.disabled = !ctrlChar;
+        releaseVersion = '';  // manual file, no version info
+        updateStartButton();
         log('Loaded: ' + file.name + ' (' + formatBytes(firmware.byteLength) + ')');
     };
     reader.readAsArrayBuffer(file);
@@ -235,50 +258,44 @@ function onFileSelect() {
 async function checkRelease() {
     try {
         log('Checking latest release...');
+        $releaseStatus.textContent = 'Checking...';
         const resp = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/releases/latest');
         if (!resp.ok) {
             log('No releases found');
+            $releaseStatus.textContent = 'No releases available';
             return;
         }
         const rel = await resp.json();
-        const asset = rel.assets.find(function (a) { return a.name.endsWith('.bin'); });
+        // Find gps_laptimer.bin specifically (not bootloader or partition table)
+        const asset = rel.assets.find(function (a) { return a.name === 'gps_laptimer.bin'; })
+                   || rel.assets.find(function (a) { return a.name.endsWith('.bin'); });
         if (!asset) {
             log('No .bin asset in release');
+            $releaseStatus.textContent = 'No firmware in release';
             return;
         }
-        releaseAsset = {
-            url: asset.browser_download_url,
-            name: asset.name,
-            size: asset.size
-        };
+
+        releaseVersion = rel.tag_name;
         $releaseVer.textContent = rel.tag_name;
         $releaseDate.textContent = new Date(rel.published_at).toLocaleDateString();
         $releaseSize.textContent = formatBytes(asset.size);
         $releaseCard.classList.remove('hidden');
-        $downloadBtn.disabled = false;
         log('Latest release: ' + rel.tag_name + ' (' + formatBytes(asset.size) + ')');
+
+        // Auto-download firmware
+        $releaseStatus.textContent = 'Downloading firmware...';
+        log('Downloading ' + asset.name + '...');
+        const dlResp = await fetch(asset.browser_download_url);
+        firmware = await dlResp.arrayBuffer();
+        firmwareName = asset.name;
+        $releaseStatus.textContent = 'Ready — ' + formatBytes(firmware.byteLength);
+        $fileInfo.textContent = firmwareName + ' (' + formatBytes(firmware.byteLength) + ')';
+        updateStartButton();
+        log('Firmware ready: ' + formatBytes(firmware.byteLength));
+
     } catch (e) {
         log('Release check failed: ' + e.message);
-    }
-}
-
-async function downloadRelease() {
-    if (!releaseAsset) return;
-    try {
-        $downloadBtn.disabled = true;
-        $downloadBtn.textContent = 'Downloading...';
-        log('Downloading ' + releaseAsset.name + '...');
-        const resp = await fetch(releaseAsset.url);
-        firmware = await resp.arrayBuffer();
-        firmwareName = releaseAsset.name;
-        $fileInfo.textContent = firmwareName + ' (' + formatBytes(firmware.byteLength) + ')';
-        $startBtn.disabled = !ctrlChar;
-        log('Downloaded: ' + formatBytes(firmware.byteLength));
-    } catch (e) {
-        log('Download failed: ' + e.message);
-    } finally {
-        $downloadBtn.disabled = false;
-        $downloadBtn.textContent = 'Download';
+        $releaseStatus.textContent = 'Failed to load release';
     }
 }
 
@@ -349,7 +366,7 @@ async function abortOta() {
         }
     }
     $abortBtn.classList.add('hidden');
-    $startBtn.disabled = !ctrlChar || !firmware;
+    updateStartButton();
     showResult('Update aborted', true);
 }
 
@@ -359,16 +376,15 @@ function showResult(msg, isError) {
     $abortBtn.classList.add('hidden');
     $resultMsg.className = isError ? 'err' : 'ok';
     $resultMsg.textContent = msg;
-    $startBtn.disabled = !ctrlChar || !firmware;
+    updateStartButton();
 }
 
 // --- Init ---
 $connectBtn.addEventListener('click', connect);
 $disconnectBtn.addEventListener('click', disconnect);
 $fileInput.addEventListener('change', onFileSelect);
-$downloadBtn.addEventListener('click', downloadRelease);
 $startBtn.addEventListener('click', startOta);
 $abortBtn.addEventListener('click', abortOta);
 
-// Check for latest release on load
+// Auto-fetch latest release on page load
 checkRelease();
