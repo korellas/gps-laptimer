@@ -1,0 +1,20 @@
+version: "1.0.0"
+description: "GPS Lap Timer for Waveshare ESP32-S3-Touch-LCD-3.49"
+
+dependencies:
+  idf: ">=5.0"
+
+  # LVGL Graphics Library
+  lvgl/lvgl: "^9"
+
+  # ESP LCD Panel IO
+  espressif/esp_lcd_panel_io_additions: "*"
+
+  # LCD panel driver for Waveshare 3.49
+  espressif/esp_lcd_axs15231b: "*"
+
+  # IO expander for panel power
+  espressif/esp_io_expander_tca9554: "*"
+
+  # Touch controller CST816S
+  espressif/esp_lcd_touch_cst816s: "*"

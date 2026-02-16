@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPS Laptimer — Firmware Update</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>GPS Laptimer</h1>
+<p class="subtitle">Firmware Update via BLE</p>
+
+<!-- Connection -->
+<div class="card">
+    <div class="card-title">Device</div>
+    <div class="info-row" style="margin-bottom:8px">
+        <span><span id="statusDot" class="status-dot disconnected"></span><span id="statusText">Disconnected</span></span>
+        <span class="version" id="devVersion">--</span>
+    </div>
+    <button class="btn" id="connectBtn">Connect to LAPTIMER</button>
+    <button class="btn btn-secondary hidden" id="disconnectBtn">Disconnect</button>
+</div>
+
+<!-- Latest Release -->
+<div class="card hidden" id="releaseCard">
+    <div class="card-title">Latest Release</div>
+    <div class="info-row"><span class="label">Version</span><span class="value" id="releaseVer">--</span></div>
+    <div class="info-row"><span class="label">Date</span><span class="value" id="releaseDate">--</span></div>
+    <div class="info-row"><span class="label">Size</span><span class="value" id="releaseSize">--</span></div>
+    <button class="btn btn-secondary" id="downloadBtn" disabled style="margin-top:8px">Download</button>
+</div>
+
+<!-- Firmware Source -->
+<div class="card">
+    <div class="card-title">Firmware</div>
+    <label style="display:block;margin-bottom:8px;color:#888;font-size:12px">Select local .bin file:</label>
+    <input type="file" id="fileInput" accept=".bin">
+    <div class="file-info" id="fileInfo"></div>
+    <button class="btn" id="startBtn" disabled style="margin-top:10px">Start Update</button>
+    <button class="btn btn-secondary hidden" id="abortBtn" style="margin-top:6px">Abort</button>
+    <div class="warn">Do not disconnect power during update!</div>
+</div>
+
+<!-- Progress -->
+<div class="card hidden" id="progressCard">
+    <div class="card-title">Update Progress</div>
+    <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+        <div class="progress-text" id="progressPct">0%</div>
+    </div>
+    <div class="stats">
+        <span id="transferred">0 B / 0 B</span>
+        <span id="speed">-- KB/s</span>
+    </div>
+    <div class="stats">
+        <span>Elapsed: <span id="elapsed">0:00</span></span>
+        <span>ETA: <span id="eta">--</span></span>
+    </div>
+</div>
+
+<!-- Result -->
+<div class="card hidden" id="resultCard">
+    <div id="resultMsg"></div>
+</div>
+
+<hr class="separator">
+
+<!-- Log -->
+<div class="card">
+    <div class="card-title">Log</div>
+    <div class="log" id="log"></div>
+</div>
+
+<div class="footer">
+    <a href="https://github.com/korellas/gps-laptimer">GPS Laptimer</a> &mdash; BLE OTA Updater
+</div>
+
+<script src="ota.js"></script>
+</body>
+</html>

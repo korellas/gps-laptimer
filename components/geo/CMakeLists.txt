@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "geo_utils.cpp"
+        "gps_filter.cpp"
+        "dead_reckoning.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_timer
+        common
+)

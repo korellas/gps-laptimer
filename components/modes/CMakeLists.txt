@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "simulation.cpp"
+        "gps_processor.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_timer
+        geo
+        track
+        timing
+        common
+)

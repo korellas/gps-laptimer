@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "delta_calculator.cpp"
+        "lap_manager.cpp"
+        "sector_timing.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_timer
+        freertos
+        geo
+        track
+        common
+)

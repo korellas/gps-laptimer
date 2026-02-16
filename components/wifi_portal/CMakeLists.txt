@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "wifi_portal.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_wifi
+        esp_http_server
+        esp_netif
+        esp_event
+        esp_timer
+        nvs_flash
+        spiffs
+        json
+        dns_server
+        common
+        ota
+)

@@ -1,0 +1,50 @@
+name: Build & Release Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py build -DAPP_VERSION_FROM_GIT=${GITHUB_REF_NAME}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.ref_name }}
+          path: |
+            build/gps_laptimer.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Firmware Update
+
+            **BLE OTA (wireless):** [Web Updater](https://korellas.github.io/gps-laptimer/)
+            **WiFi OTA:** Connect to LAPTIMER WiFi → http://192.168.4.1/ota
+
+            Download `gps_laptimer.bin` below and use either method to update.
+          append_body: true
+          files: |
+            build/gps_laptimer.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin

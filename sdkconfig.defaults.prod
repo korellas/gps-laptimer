@@ -1,0 +1,24 @@
+# GPS Laptimer - Production Build Overrides
+#
+# Usage (ESP-IDF CMD):
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.prod" build
+#
+# Windows Ninja (direct):
+#   cmake -G Ninja -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.prod" ...
+#
+# These settings override sdkconfig.defaults for production firmware.
+# Changes vs development:
+#   - Log level: INFO -> WARN (saves ~2-5mA from USB serial output)
+#   - Max log level: DEBUG -> WARN (strips debug/info strings from binary)
+#   - Assertions: silent (log + continue, no abort on non-critical)
+
+# Log Level: WARN only (suppress INFO in production)
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL=2
+
+# Maximum compiled log level: WARN (strip DEBUG/INFO strings from flash)
+CONFIG_LOG_MAXIMUM_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL=2
+
+# Assertions: silent (ESP_ERROR_CHECK prints but doesn't abort)
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
