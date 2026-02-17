@@ -20,6 +20,8 @@
 #include "esp_timer.h"
 #include "esp_bt.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
+#include "esp_memory_utils.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
@@ -32,6 +34,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 #include <cstring>
+#include <cstdio>
 
 static const char *TAG = "BLE_OTA";
 
@@ -52,6 +55,15 @@ static int s_lastNotifyPct = -1;
 
 static constexpr TickType_t HOST_TASK_STOP_TIMEOUT_TICKS  = pdMS_TO_TICKS(1000);
 static constexpr TickType_t HS_SYNC_TIMEOUT_TICKS         = pdMS_TO_TICKS(4000);
+
+// NimBLE host task must run on internal RAM stack.
+// OTA flash operations can freeze cache; external RAM stack is unsafe and can assert.
+static constexpr uint32_t NIMBLE_HOST_STATIC_STACK_BYTES =
+    (CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE < 4096) ? 4096 : CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE;
+static constexpr uint32_t NIMBLE_HOST_STATIC_STACK_WORDS =
+    (NIMBLE_HOST_STATIC_STACK_BYTES + sizeof(StackType_t) - 1) / sizeof(StackType_t);
+DRAM_ATTR static StackType_t s_hostTaskStack[NIMBLE_HOST_STATIC_STACK_WORDS];
+DRAM_ATTR static StaticTask_t s_hostTaskTcb;
 
 // Forward declarations
 static void startAdvertising(void);
@@ -124,6 +136,18 @@ static int onControlAccess(uint16_t conn_handle, uint16_t attr_handle,
         uint32_t imageSize;
         os_mbuf_copydata(ctxt->om, 1, 4, &imageSize);
         ESP_LOGI(TAG, "CMD START: %lu bytes", (unsigned long)imageSize);
+
+        // Guard against OTA begin on external-RAM task stack.
+        // This can trigger cache freeze asserts in esp_ota_begin().
+        uint32_t stackProbe = 0;
+        if (!esp_ptr_internal(&stackProbe)) {
+            ESP_LOGE(TAG, "CMD START rejected: callback stack is not in internal RAM");
+            snprintf(gApp.otaErrorMsg, sizeof(gApp.otaErrorMsg), "BLE host stack must be internal RAM");
+            gApp.otaState = OTAState::ERROR;
+            sendStatusNotify();
+            return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+        }
+
         s_lastNotifyPct = -1;
         if (!ota::begin(imageSize)) {
             sendStatusNotify();
@@ -406,93 +430,49 @@ static bool waitForFalse(volatile bool &flag, TickType_t timeoutTicks)
 
 static esp_err_t startNimbleHostTask(void)
 {
-    // Try the configured stack first, then smaller fallbacks.
-    const uint32_t stackCandidates[] = {
-        (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE,
-        6144,
-        4096,
-    };
     const BaseType_t preferredCore = CONFIG_BT_NIMBLE_PINNED_TO_CORE;
-    esp_err_t err = ESP_FAIL;
+    const uint32_t stackBytes = NIMBLE_HOST_STATIC_STACK_WORDS * sizeof(StackType_t);
+    ESP_LOGI(TAG, "Creating nimble_host with static internal stack (size=%lu, internal=%d)",
+             (unsigned long)stackBytes, (int)esp_ptr_internal(s_hostTaskStack));
 
-    auto tryCreate = [&](BaseType_t core, UBaseType_t caps, const char *capsName) -> esp_err_t {
-        for (uint32_t stackBytes : stackCandidates) {
-            if (stackBytes == 0) {
-                continue;
-            }
-
-            // Skip duplicate attempts when config equals fallback.
-            if (stackBytes != (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE) {
-                if (stackBytes == 6144 && (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE == 6144) {
-                    continue;
-                }
-                if (stackBytes == 4096 && (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE == 4096) {
-                    continue;
-                }
-            }
-
-            BaseType_t rc = xTaskCreatePinnedToCoreWithCaps(
-                bleHostTask,
-                "nimble_host",
-                stackBytes,
-                NULL,
-                (configMAX_PRIORITIES - 4),
-                &s_hostTaskHandle,
-                core,
-                caps);
-
-            if (rc == pdPASS) {
-                ESP_LOGI(TAG, "nimble_host created (stack=%lu, core=%ld, mem=%s)",
-                         (unsigned long)stackBytes, (long)core, capsName);
-                return ESP_OK;
-            }
-
-            s_hostTaskHandle = nullptr;
-            ESP_LOGW(TAG, "nimble_host create failed (stack=%lu, core=%ld, mem=%s, rc=%ld)",
-                     (unsigned long)stackBytes, (long)core, capsName, (long)rc);
+    auto tryCreateStatic = [&](BaseType_t core) -> esp_err_t {
+        TaskHandle_t h = xTaskCreateStaticPinnedToCore(
+            bleHostTask,
+            "nimble_host",
+            NIMBLE_HOST_STATIC_STACK_WORDS,
+            NULL,
+            (configMAX_PRIORITIES - 4),
+            s_hostTaskStack,
+            &s_hostTaskTcb,
+            core);
+        if (h != nullptr) {
+            s_hostTaskHandle = h;
+            ESP_LOGI(TAG, "nimble_host created (core=%ld, stack=%lu bytes, internal static)",
+                     (long)core, (unsigned long)stackBytes);
+            return ESP_OK;
         }
+        s_hostTaskHandle = nullptr;
+        ESP_LOGW(TAG, "nimble_host static create failed (core=%ld)", (long)core);
         return ESP_ERR_NO_MEM;
     };
 
-#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
-    const UBaseType_t spiramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    ESP_LOGI(TAG, "Trying nimble_host create with SPIRAM stack first");
-
-    err = tryCreate(preferredCore, spiramCaps, "spiram");
-    if (err == ESP_OK) {
-        return ESP_OK;
-    }
-
-#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
-    const BaseType_t altCoreSpiram = (preferredCore == 0) ? 1 : 0;
-    ESP_LOGW(TAG, "Retrying nimble_host create on alternate core=%ld (spiram)", (long)altCoreSpiram);
-    err = tryCreate(altCoreSpiram, spiramCaps, "spiram");
-    if (err == ESP_OK) {
-        return ESP_OK;
-    }
-#endif
-#endif
-
-    const UBaseType_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-    ESP_LOGW(TAG, "Falling back to internal RAM stack for nimble_host");
-
-    err = tryCreate(preferredCore, internalCaps, "internal");
+    esp_err_t err = tryCreateStatic(preferredCore);
     if (err == ESP_OK) {
         return ESP_OK;
     }
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
     const BaseType_t altCore = (preferredCore == 0) ? 1 : 0;
-    ESP_LOGW(TAG, "Retrying nimble_host create on alternate core=%ld (internal)", (long)altCore);
-    err = tryCreate(altCore, internalCaps, "internal");
+    ESP_LOGW(TAG, "Retrying nimble_host static create on alternate core=%ld", (long)altCore);
+    err = tryCreateStatic(altCore);
     if (err == ESP_OK) {
         return ESP_OK;
     }
 #endif
 
-    ESP_LOGE(TAG, "Failed to create nimble_host task (configured stack=%d, core=%d, int_largest=%lu, spiram_largest=%lu)",
-             CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE,
-             CONFIG_BT_NIMBLE_PINNED_TO_CORE,
+    ESP_LOGE(TAG, "Failed to create nimble_host static task (stack=%lu, preferred_core=%d, int_largest=%lu, spiram_largest=%lu)",
+             (unsigned long)stackBytes,
+             preferredCore,
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     return ESP_ERR_NO_MEM;
