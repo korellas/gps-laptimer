@@ -42,7 +42,6 @@ jobs:
 
           if ! RELEASE_JSON=$(curl -fsSL \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             "${API_URL}"); then
             echo "Could not fetch latest release metadata. Continue without bundled firmware."
             exit 0
