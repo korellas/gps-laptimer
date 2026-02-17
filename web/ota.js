@@ -43,6 +43,7 @@ const $releaseVer = document.getElementById("releaseVer");
 const $releaseDate = document.getElementById("releaseDate");
 const $releaseSize = document.getElementById("releaseSize");
 const $releaseStatus = document.getElementById("releaseStatus");
+const $retryReleaseBtn = document.getElementById("retryReleaseBtn");
 const $fileInput = document.getElementById("fileInput");
 const $fileInfo = document.getElementById("fileInfo");
 const $confirmUpdate = document.getElementById("confirmUpdate");
@@ -67,6 +68,7 @@ let dataChar = null;
 let statChar = null;
 let firmware = null; // ArrayBuffer
 let firmwareName = "";
+let firmwareSource = "";
 let releaseVersion = "";
 let deviceVersion = "";
 let transferring = false;
@@ -78,6 +80,33 @@ function log(msg) {
     const ts = new Date().toLocaleTimeString();
     $log.textContent += "[" + ts + "] " + msg + "\n";
     $log.scrollTop = $log.scrollHeight;
+}
+
+function formatError(err) {
+    if (!err) {
+        return "unknown error";
+    }
+    if (err.name === "AbortError") {
+        return "request timeout";
+    }
+    if (err.message) {
+        return err.message;
+    }
+    return String(err);
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(function () {
+        controller.abort();
+    }, timeoutMs || 30000);
+    try {
+        const opts = Object.assign({}, options || {});
+        opts.signal = controller.signal;
+        return await fetch(url, opts);
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
 function setProgressState(text, isError) {
@@ -118,6 +147,13 @@ function getTargetLabel() {
         return firmwareName;
     }
     return "selected firmware";
+}
+
+function setFirmwareLoaded(buffer, name, source) {
+    firmware = buffer;
+    firmwareName = name || "gps_laptimer.bin";
+    firmwareSource = source || "unknown";
+    $fileInfo.textContent = firmwareName + " (" + formatBytes(firmware.byteLength) + "), source: " + firmwareSource;
 }
 
 function updateConnectionDot(connected) {
@@ -358,25 +394,50 @@ function onFileSelect() {
     reader.onload = function () {
         firmware = reader.result;
         firmwareName = file.name;
+        firmwareSource = "local file";
         releaseVersion = ""; // Manual file, version unknown.
+        setFirmwareLoaded(firmware, firmwareName, firmwareSource);
         resetConfirmation();
         log("Loaded local file: " + file.name + " (" + formatBytes(firmware.byteLength) + ")");
     };
     reader.readAsArrayBuffer(file);
 }
 
+async function tryDownloadFirmware(url, sourceName, expectedSize) {
+    log("[FW] Download attempt: " + sourceName + " (" + url + ")");
+    const resp = await fetchWithTimeout(url, { cache: "no-store" }, 30000);
+    if (!resp.ok) {
+        throw new Error("HTTP " + resp.status + " from " + sourceName);
+    }
+    const buffer = await resp.arrayBuffer();
+    if (expectedSize && buffer.byteLength !== expectedSize) {
+        throw new Error(
+            sourceName + " size mismatch (expected " + expectedSize + ", got " + buffer.byteLength + ")"
+        );
+    }
+    return buffer;
+}
+
 async function checkRelease() {
+    if ($retryReleaseBtn) {
+        $retryReleaseBtn.disabled = true;
+    }
     try {
         releaseAutoState = "loading";
         updateStartButton();
+        log("Origin: " + window.location.origin);
         log("Checking latest release...");
         $releaseStatus.textContent = "Checking...";
 
-        const resp = await fetch("https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest");
+        const resp = await fetchWithTimeout(
+            "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest",
+            { cache: "no-store" },
+            15000
+        );
         if (!resp.ok) {
             log("No releases found");
             releaseAutoState = "unavailable";
-            $releaseStatus.textContent = "No releases available";
+            $releaseStatus.textContent = "No releases available (HTTP " + resp.status + ")";
             $releaseCard.classList.remove("hidden");
             updateStartButton();
             return;
@@ -402,22 +463,44 @@ async function checkRelease() {
         $releaseCard.classList.remove("hidden");
 
         log("Latest release: " + rel.tag_name + " (" + formatBytes(asset.size) + ")");
-        $releaseStatus.textContent = "Downloading firmware package...";
+        $releaseStatus.textContent = "Downloading firmware package (same-origin preferred)...";
 
-        const dlResp = await fetch(asset.browser_download_url);
-        firmware = await dlResp.arrayBuffer();
-        firmwareName = asset.name;
+        const attemptErrors = [];
+        let fwBuffer = null;
+        const sameOriginUrl = "./firmware/latest/gps_laptimer.bin";
+        try {
+            fwBuffer = await tryDownloadFirmware(sameOriginUrl, "same-origin cache", asset.size);
+            setFirmwareLoaded(fwBuffer, asset.name, "same-origin cache");
+            log("[FW] Downloaded from same-origin cache.");
+        } catch (e1) {
+            const err1 = formatError(e1);
+            attemptErrors.push("same-origin: " + err1);
+            log("[FW] same-origin cache failed: " + err1);
+            try {
+                fwBuffer = await tryDownloadFirmware(asset.browser_download_url, "github release", asset.size);
+                setFirmwareLoaded(fwBuffer, asset.name, "github release");
+                log("[FW] Downloaded from github release URL.");
+            } catch (e2) {
+                const err2 = formatError(e2);
+                attemptErrors.push("github release: " + err2);
+                throw new Error(attemptErrors.join(" | "));
+            }
+        }
 
-        $fileInfo.textContent = firmwareName + " (" + formatBytes(firmware.byteLength) + ")";
-        $releaseStatus.textContent = "Firmware ready. Update starts only after manual confirmation + Start button.";
+        $releaseStatus.textContent =
+            "Firmware ready from " + firmwareSource + ". Update starts only after manual confirmation + Start button.";
         resetConfirmation();
         log("Firmware ready: " + formatBytes(firmware.byteLength));
     } catch (e) {
         releaseAutoState = "failed";
-        log("Release check failed: " + e.message);
-        $releaseStatus.textContent = "Failed to load release. Select a local .bin file.";
+        log("Release check failed: " + formatError(e));
+        $releaseStatus.textContent = "Failed to load release package. Select a local .bin file or retry.";
         $releaseCard.classList.remove("hidden");
         updateStartButton();
+    } finally {
+        if ($retryReleaseBtn) {
+            $retryReleaseBtn.disabled = false;
+        }
     }
 }
 
@@ -526,6 +609,9 @@ function showResult(msg, isError) {
 $connectBtn.addEventListener("click", connect);
 $disconnectBtn.addEventListener("click", disconnect);
 $fileInput.addEventListener("change", onFileSelect);
+if ($retryReleaseBtn) {
+    $retryReleaseBtn.addEventListener("click", checkRelease);
+}
 $confirmUpdate.addEventListener("change", updateStartButton);
 $startBtn.addEventListener("click", startOta);
 $abortBtn.addEventListener("click", abortOta);

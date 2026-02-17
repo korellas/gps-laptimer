@@ -4,7 +4,12 @@ name: Deploy Web App
 on:
   push:
     branches: [main]
-    paths: ['web/**']
+    paths:
+      - 'web/**'
+      - '.github/workflows/pages.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,6 +28,53 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Inject latest firmware into web artifact
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p web/firmware/latest
+          API_URL="https://api.github.com/repos/${{ github.repository }}/releases/latest"
+
+          if ! RELEASE_JSON=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "${API_URL}"); then
+            echo "Could not fetch latest release metadata. Continue without bundled firmware."
+            exit 0
+          fi
+
+          TAG=$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty')
+          ASSET_API_URL=$(echo "${RELEASE_JSON}" | jq -r '.assets[] | select(.name=="gps_laptimer.bin") | .url' | head -n 1 || true)
+          ASSET_SIZE=$(echo "${RELEASE_JSON}" | jq -r '.assets[] | select(.name=="gps_laptimer.bin") | .size' | head -n 1 || true)
+
+          if [ -z "${ASSET_API_URL}" ]; then
+            echo "No gps_laptimer.bin in latest release. Continue without bundled firmware."
+            exit 0
+          fi
+
+          curl -fLsS \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "${ASSET_API_URL}" \
+            -o web/firmware/latest/gps_laptimer.bin
+
+          ACTUAL_SIZE=$(wc -c < web/firmware/latest/gps_laptimer.bin | tr -d ' ')
+          ACTUAL_SHA256=$(sha256sum web/firmware/latest/gps_laptimer.bin | awk '{print $1}')
+
+          cat > web/firmware/latest/meta.json <<EOF
+          {
+            "tag": "${TAG}",
+            "expected_size": ${ASSET_SIZE:-0},
+            "actual_size": ${ACTUAL_SIZE},
+            "sha256": "${ACTUAL_SHA256}",
+            "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          echo "Bundled firmware: tag=${TAG}, size=${ACTUAL_SIZE}, sha256=${ACTUAL_SHA256}"
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
