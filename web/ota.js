@@ -1,121 +1,166 @@
 /**
- * GPS Laptimer — BLE OTA Updater
- *
- * Web Bluetooth API로 ESP32-S3 NimBLE GATT 서비스에 연결하여
- * 펌웨어를 전송하는 프론트엔드 로직.
+ * GPS Laptimer BLE OTA Updater
  *
  * GATT Service: 0xFFE0
- *   - Control (0xFFE1): Write — START/END/ABORT/VERSION
- *   - Data    (0xFFE2): Write Without Response — firmware chunks
- *   - Status  (0xFFE3): Read + Notify — [state, progress, error, version(16B)]
+ *   - Control (0xFFE1): START/END/ABORT/VERSION
+ *   - Data    (0xFFE2): firmware chunks
+ *   - Status  (0xFFE3): [state, progress, error, version(16B)]
  */
 
 // BLE UUIDs
-const SVC_UUID  = 0xFFE0;
+const SVC_UUID = 0xFFE0;
 const CTRL_UUID = 0xFFE1;
 const DATA_UUID = 0xFFE2;
 const STAT_UUID = 0xFFE3;
 
 // Control commands
-const CMD_START   = 0x01;
-const CMD_END     = 0x02;
-const CMD_ABORT   = 0x03;
+const CMD_START = 0x01;
+const CMD_END = 0x02;
+const CMD_ABORT = 0x03;
 const CMD_VERSION = 0x04;
 
 // OTA states
-const STATE_IDLE       = 0;
-const STATE_RECEIVING  = 1;
+const STATE_IDLE = 0;
+const STATE_RECEIVING = 1;
 const STATE_VALIDATING = 2;
-const STATE_COMPLETE   = 3;
-const STATE_ERROR      = 4;
+const STATE_COMPLETE = 3;
+const STATE_ERROR = 4;
 
 // Chunk size for BLE transfer
 const CHUNK_SIZE = 512;
 
 // GitHub repo for release downloads
-const GITHUB_REPO = 'korellas/gps-laptimer';
+const GITHUB_REPO = "korellas/gps-laptimer";
 
 // --- DOM refs ---
-const $connectBtn    = document.getElementById('connectBtn');
-const $disconnectBtn = document.getElementById('disconnectBtn');
-const $statusDot     = document.getElementById('statusDot');
-const $statusText    = document.getElementById('statusText');
-const $devVersion    = document.getElementById('devVersion');
-const $releaseCard   = document.getElementById('releaseCard');
-const $releaseVer    = document.getElementById('releaseVer');
-const $releaseDate   = document.getElementById('releaseDate');
-const $releaseSize   = document.getElementById('releaseSize');
-const $releaseStatus = document.getElementById('releaseStatus');
-const $fileInput     = document.getElementById('fileInput');
-const $fileInfo      = document.getElementById('fileInfo');
-const $startBtn      = document.getElementById('startBtn');
-const $progressCard  = document.getElementById('progressCard');
-const $progressFill  = document.getElementById('progressFill');
-const $progressPct   = document.getElementById('progressPct');
-const $transferred   = document.getElementById('transferred');
-const $elapsed       = document.getElementById('elapsed');
-const $speed         = document.getElementById('speed');
-const $eta           = document.getElementById('eta');
-const $resultCard    = document.getElementById('resultCard');
-const $resultMsg     = document.getElementById('resultMsg');
-const $log           = document.getElementById('log');
-const $abortBtn      = document.getElementById('abortBtn');
+const $connectBtn = document.getElementById("connectBtn");
+const $disconnectBtn = document.getElementById("disconnectBtn");
+const $statusDot = document.getElementById("statusDot");
+const $statusText = document.getElementById("statusText");
+const $devVersion = document.getElementById("devVersion");
+const $releaseCard = document.getElementById("releaseCard");
+const $releaseVer = document.getElementById("releaseVer");
+const $releaseDate = document.getElementById("releaseDate");
+const $releaseSize = document.getElementById("releaseSize");
+const $releaseStatus = document.getElementById("releaseStatus");
+const $fileInput = document.getElementById("fileInput");
+const $fileInfo = document.getElementById("fileInfo");
+const $confirmUpdate = document.getElementById("confirmUpdate");
+const $startBtn = document.getElementById("startBtn");
+const $progressCard = document.getElementById("progressCard");
+const $progressState = document.getElementById("progressState");
+const $progressFill = document.getElementById("progressFill");
+const $progressPct = document.getElementById("progressPct");
+const $transferred = document.getElementById("transferred");
+const $elapsed = document.getElementById("elapsed");
+const $speed = document.getElementById("speed");
+const $eta = document.getElementById("eta");
+const $resultCard = document.getElementById("resultCard");
+const $resultMsg = document.getElementById("resultMsg");
+const $log = document.getElementById("log");
+const $abortBtn = document.getElementById("abortBtn");
 
 // --- State ---
 let bleDevice = null;
-let ctrlChar  = null;
-let dataChar  = null;
-let statChar  = null;
-let firmware  = null;   // ArrayBuffer
-let firmwareName = '';
-let releaseVersion = '';
-let deviceVersion = '';
+let ctrlChar = null;
+let dataChar = null;
+let statChar = null;
+let firmware = null; // ArrayBuffer
+let firmwareName = "";
+let releaseVersion = "";
+let deviceVersion = "";
 let transferring = false;
 let startTime = 0;
+let releaseAutoState = "loading"; // loading | ready | unavailable | failed
 
 // --- Logging ---
 function log(msg) {
     const ts = new Date().toLocaleTimeString();
-    $log.textContent += '[' + ts + '] ' + msg + '\n';
+    $log.textContent += "[" + ts + "] " + msg + "\n";
     $log.scrollTop = $log.scrollHeight;
+}
+
+function setProgressState(text, isError) {
+    const error = !!isError;
+    const ok = !error && text.toLowerCase().includes("complete");
+    $progressState.textContent = text;
+    $progressState.className = "progress-state" + (error ? " error" : ok ? " ok" : "");
+}
+
+function resetProgressView() {
+    $progressFill.style.width = "0%";
+    $progressPct.textContent = "0%";
+    $transferred.textContent = "0 B / 0 B";
+    $elapsed.textContent = "0:00";
+    $speed.textContent = "-- KB/s";
+    $eta.textContent = "--";
+    setProgressState("Ready", false);
+}
+
+function setTransferringUi(active) {
+    transferring = active;
+    $abortBtn.classList.toggle("hidden", !active);
+    $fileInput.disabled = active;
+    $confirmUpdate.disabled = active;
+    updateStartButton();
+}
+
+function resetConfirmation() {
+    $confirmUpdate.checked = false;
+    updateStartButton();
+}
+
+function getTargetLabel() {
+    if (releaseVersion) {
+        return releaseVersion;
+    }
+    if (firmwareName) {
+        return firmwareName;
+    }
+    return "selected firmware";
+}
+
+function updateConnectionDot(connected) {
+    if (!connected) {
+        $statusDot.className = "status-dot disconnected";
+        return;
+    }
+    $statusDot.className = transferring ? "status-dot updating" : "status-dot connected";
 }
 
 // --- BLE Connection ---
 async function connect() {
     if (!navigator.bluetooth) {
-        alert('Web Bluetooth is not supported in this browser.\nUse Chrome or Edge.');
+        alert("Web Bluetooth is not supported in this browser. Use Chrome or Edge.");
         return;
     }
+
     try {
-        log('Scanning for LAPTIMER-OTA...');
+        log("Scanning for LAPTIMER-OTA...");
         bleDevice = await navigator.bluetooth.requestDevice({
-            filters: [{ namePrefix: 'LAPTIMER' }],
+            filters: [{ namePrefix: "LAPTIMER" }],
             optionalServices: [SVC_UUID]
         });
-        bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+        bleDevice.addEventListener("gattserverdisconnected", onDisconnected);
 
-        log('Connecting to ' + bleDevice.name + '...');
+        log("Connecting to " + bleDevice.name + "...");
         const server = await bleDevice.gatt.connect();
 
-        log('Getting OTA service...');
+        log("Getting OTA service...");
         const svc = await server.getPrimaryService(SVC_UUID);
 
         ctrlChar = await svc.getCharacteristic(CTRL_UUID);
         dataChar = await svc.getCharacteristic(DATA_UUID);
         statChar = await svc.getCharacteristic(STAT_UUID);
 
-        // Subscribe to status notifications
         await statChar.startNotifications();
-        statChar.addEventListener('characteristicvaluechanged', onStatusNotify);
+        statChar.addEventListener("characteristicvaluechanged", onStatusNotify);
 
         setConnected(true);
-        log('Connected! Requesting version...');
-
-        // Request version
+        log("Connected. Requesting device version...");
         await ctrlChar.writeValue(new Uint8Array([CMD_VERSION]));
-
     } catch (e) {
-        log('Error: ' + e.message);
+        log("Error: " + e.message);
         setConnected(false);
     }
 }
@@ -127,56 +172,92 @@ function disconnect() {
 }
 
 function onDisconnected() {
-    log('Disconnected');
-    setConnected(false);
+    log("Disconnected");
     ctrlChar = null;
     dataChar = null;
     statChar = null;
-    deviceVersion = '';
+    deviceVersion = "";
+    $devVersion.textContent = "--";
+
     if (transferring) {
-        transferring = false;
-        showResult('Connection lost during transfer', true);
+        setTransferringUi(false);
+        setProgressState("Disconnected during update", true);
+        showResult("Connection lost during transfer", true);
     }
+
+    setConnected(false);
+    resetConfirmation();
 }
 
 function setConnected(connected) {
-    $statusDot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
-    $statusText.textContent = connected ? 'Connected' : 'Disconnected';
-    $connectBtn.classList.toggle('hidden', connected);
-    $disconnectBtn.classList.toggle('hidden', !connected);
+    updateConnectionDot(connected);
+    $statusText.textContent = connected ? "Connected" : "Disconnected";
+    $connectBtn.classList.toggle("hidden", connected);
+    $disconnectBtn.classList.toggle("hidden", !connected);
     updateStartButton();
 }
 
 function updateStartButton() {
-    var ready = ctrlChar && firmware;
-    $startBtn.disabled = !ready;
-    if (firmware && releaseVersion) {
-        if (deviceVersion && deviceVersion === releaseVersion) {
-            $startBtn.textContent = 'Already up to date (' + deviceVersion + ')';
-            $startBtn.disabled = true;
-        } else if (deviceVersion) {
-            $startBtn.textContent = 'Update ' + deviceVersion + ' → ' + releaseVersion;
+    const connected = !!ctrlChar;
+    const hasFirmware = !!firmware;
+    const confirmed = !!$confirmUpdate.checked;
+
+    if (transferring) {
+        $startBtn.disabled = true;
+        $startBtn.textContent = "Updating...";
+        return;
+    }
+
+    if (!hasFirmware) {
+        $startBtn.disabled = true;
+        if (releaseAutoState === "loading") {
+            $startBtn.textContent = "Loading firmware...";
         } else {
-            $startBtn.textContent = 'Update to ' + releaseVersion;
+            $startBtn.textContent = "Select local .bin file";
         }
-    } else if (firmware) {
-        $startBtn.textContent = 'Start Update';
+        return;
+    }
+
+    if (releaseVersion && deviceVersion && deviceVersion === releaseVersion) {
+        $startBtn.disabled = true;
+        $startBtn.textContent = "Already up to date (" + deviceVersion + ")";
+        return;
+    }
+
+    if (!connected) {
+        $startBtn.disabled = true;
+        $startBtn.textContent = "Connect device first";
+        return;
+    }
+
+    if (!confirmed) {
+        $startBtn.disabled = true;
+        $startBtn.textContent = "Check confirmation to enable update";
+        return;
+    }
+
+    $startBtn.disabled = false;
+    if (releaseVersion && deviceVersion) {
+        $startBtn.textContent = "Start Update " + deviceVersion + " -> " + releaseVersion;
+    } else if (releaseVersion) {
+        $startBtn.textContent = "Start Update to " + releaseVersion;
     } else {
-        $startBtn.textContent = 'Loading firmware...';
+        $startBtn.textContent = "Start Update";
     }
 }
 
 // --- Status Notification ---
 function onStatusNotify(event) {
     const data = new Uint8Array(event.target.value.buffer);
-    if (data.length < 3) return;
+    if (data.length < 3) {
+        return;
+    }
 
     const state = data[0];
     const progress = data[1];
     const errorCode = data[2];
 
-    // Extract version string (bytes 3-18)
-    let version = '';
+    let version = "";
     if (data.length >= 19) {
         const verBytes = data.slice(3, 19);
         const nullIdx = verBytes.indexOf(0);
@@ -186,136 +267,197 @@ function onStatusNotify(event) {
     if (version && state === STATE_IDLE) {
         deviceVersion = version;
         $devVersion.textContent = version;
-        log('Device version: ' + version);
+        log("Device version: " + version);
         updateStartButton();
     }
 
     if (state === STATE_RECEIVING) {
+        $progressCard.classList.remove("hidden");
+        setProgressState("Uploading firmware...", false);
         updateProgress(progress);
-    } else if (state === STATE_VALIDATING) {
+        return;
+    }
+
+    if (state === STATE_VALIDATING) {
+        $progressCard.classList.remove("hidden");
         updateProgress(100);
-        $progressPct.textContent = 'Validating...';
-        log('Validating firmware...');
-    } else if (state === STATE_COMPLETE) {
-        transferring = false;
-        log('OTA complete! Device is rebooting...');
-        showResult('Update successful! Device is rebooting.', false);
-    } else if (state === STATE_ERROR) {
-        transferring = false;
-        const errors = ['Unknown', 'Image too large', 'Validation failed', 'Low battery', 'Write error'];
-        const msg = errors[errorCode] || ('Error code: ' + errorCode);
-        log('OTA error: ' + msg);
+        setProgressState("Validating firmware on device...", false);
+        log("Validating firmware...");
+        return;
+    }
+
+    if (state === STATE_COMPLETE) {
+        setTransferringUi(false);
+        updateConnectionDot(true);
+        updateProgress(100);
+        setProgressState("Complete. Device rebooting...", false);
+        log("OTA complete. Device is rebooting...");
+        showResult("Update successful! Device is rebooting.", false);
+        resetConfirmation();
+        return;
+    }
+
+    if (state === STATE_ERROR) {
+        const errors = ["Unknown", "Image too large", "Validation failed", "Low battery", "Write error"];
+        const msg = errors[errorCode] || ("Error code: " + errorCode);
+        setTransferringUi(false);
+        setProgressState("Error: " + msg, true);
+        log("OTA error: " + msg);
         showResult(msg, true);
+        return;
+    }
+
+    if (state === STATE_IDLE && !transferring) {
+        setProgressState("Ready", false);
     }
 }
 
 // --- Progress ---
 function updateProgress(pct) {
-    $progressFill.style.width = pct + '%';
-    $progressPct.textContent = pct + '%';
+    $progressFill.style.width = pct + "%";
+    $progressPct.textContent = pct + "%";
 
-    if (startTime > 0) {
-        const elapsed = (Date.now() - startTime) / 1000;
-        const bytesTotal = firmware ? firmware.byteLength : 0;
-        const bytesSent = Math.round(bytesTotal * pct / 100);
-        const kbps = elapsed > 0 ? (bytesSent / 1024 / elapsed).toFixed(1) : '0';
-        const etaSec = pct > 0 ? Math.round(elapsed * (100 - pct) / pct) : 0;
-
-        $transferred.textContent = formatBytes(bytesSent) + ' / ' + formatBytes(bytesTotal);
-        $elapsed.textContent = formatTime(elapsed);
-        $speed.textContent = kbps + ' KB/s';
-        $eta.textContent = etaSec > 0 ? formatTime(etaSec) : '--';
+    if (startTime <= 0) {
+        return;
     }
+
+    const elapsedSec = (Date.now() - startTime) / 1000;
+    const bytesTotal = firmware ? firmware.byteLength : 0;
+    const bytesSent = Math.round(bytesTotal * pct / 100);
+    const kbps = elapsedSec > 0 ? (bytesSent / 1024 / elapsedSec).toFixed(1) : "0";
+    const etaSec = pct > 0 ? Math.round(elapsedSec * (100 - pct) / pct) : 0;
+
+    $transferred.textContent = formatBytes(bytesSent) + " / " + formatBytes(bytesTotal);
+    $elapsed.textContent = formatTime(elapsedSec);
+    $speed.textContent = kbps + " KB/s";
+    $eta.textContent = etaSec > 0 ? formatTime(etaSec) : "--";
 }
 
-function formatBytes(b) {
-    if (b < 1024) return b + ' B';
-    return (b / 1024 / 1024).toFixed(2) + ' MB';
+function formatBytes(bytes) {
+    if (bytes < 1024) {
+        return bytes + " B";
+    }
+    return (bytes / 1024 / 1024).toFixed(2) + " MB";
 }
 
 function formatTime(sec) {
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
-    return m + ':' + (s < 10 ? '0' : '') + s;
+    return m + ":" + (s < 10 ? "0" : "") + s;
 }
 
 // --- Firmware source ---
 function onFileSelect() {
     const file = $fileInput.files[0];
-    if (!file) return;
-    $fileInfo.textContent = file.name + ' (' + formatBytes(file.size) + ')';
+    if (!file) {
+        return;
+    }
+
+    $fileInfo.textContent = file.name + " (" + formatBytes(file.size) + ")";
     const reader = new FileReader();
     reader.onload = function () {
         firmware = reader.result;
         firmwareName = file.name;
-        releaseVersion = '';  // manual file, no version info
-        updateStartButton();
-        log('Loaded: ' + file.name + ' (' + formatBytes(firmware.byteLength) + ')');
+        releaseVersion = ""; // Manual file, version unknown.
+        resetConfirmation();
+        log("Loaded local file: " + file.name + " (" + formatBytes(firmware.byteLength) + ")");
     };
     reader.readAsArrayBuffer(file);
 }
 
 async function checkRelease() {
     try {
-        log('Checking latest release...');
-        $releaseStatus.textContent = 'Checking...';
-        const resp = await fetch('https://api.github.com/repos/' + GITHUB_REPO + '/releases/latest');
+        releaseAutoState = "loading";
+        updateStartButton();
+        log("Checking latest release...");
+        $releaseStatus.textContent = "Checking...";
+
+        const resp = await fetch("https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest");
         if (!resp.ok) {
-            log('No releases found');
-            $releaseStatus.textContent = 'No releases available';
+            log("No releases found");
+            releaseAutoState = "unavailable";
+            $releaseStatus.textContent = "No releases available";
+            $releaseCard.classList.remove("hidden");
+            updateStartButton();
             return;
         }
+
         const rel = await resp.json();
-        // Find gps_laptimer.bin specifically (not bootloader or partition table)
-        const asset = rel.assets.find(function (a) { return a.name === 'gps_laptimer.bin'; })
-                   || rel.assets.find(function (a) { return a.name.endsWith('.bin'); });
+        const asset = rel.assets.find(function (a) { return a.name === "gps_laptimer.bin"; })
+            || rel.assets.find(function (a) { return a.name.endsWith(".bin"); });
         if (!asset) {
-            log('No .bin asset in release');
-            $releaseStatus.textContent = 'No firmware in release';
+            log("No .bin asset in release");
+            releaseAutoState = "failed";
+            $releaseStatus.textContent = "No firmware in release";
+            $releaseCard.classList.remove("hidden");
+            updateStartButton();
             return;
         }
 
         releaseVersion = rel.tag_name;
+        releaseAutoState = "ready";
         $releaseVer.textContent = rel.tag_name;
         $releaseDate.textContent = new Date(rel.published_at).toLocaleDateString();
         $releaseSize.textContent = formatBytes(asset.size);
-        $releaseCard.classList.remove('hidden');
-        log('Latest release: ' + rel.tag_name + ' (' + formatBytes(asset.size) + ')');
+        $releaseCard.classList.remove("hidden");
 
-        // Auto-download firmware
-        $releaseStatus.textContent = 'Downloading firmware...';
-        log('Downloading ' + asset.name + '...');
+        log("Latest release: " + rel.tag_name + " (" + formatBytes(asset.size) + ")");
+        $releaseStatus.textContent = "Downloading firmware package...";
+
         const dlResp = await fetch(asset.browser_download_url);
         firmware = await dlResp.arrayBuffer();
         firmwareName = asset.name;
-        $releaseStatus.textContent = 'Ready — ' + formatBytes(firmware.byteLength);
-        $fileInfo.textContent = firmwareName + ' (' + formatBytes(firmware.byteLength) + ')';
-        updateStartButton();
-        log('Firmware ready: ' + formatBytes(firmware.byteLength));
 
+        $fileInfo.textContent = firmwareName + " (" + formatBytes(firmware.byteLength) + ")";
+        $releaseStatus.textContent = "Firmware ready. Update starts only after manual confirmation + Start button.";
+        resetConfirmation();
+        log("Firmware ready: " + formatBytes(firmware.byteLength));
     } catch (e) {
-        log('Release check failed: ' + e.message);
-        $releaseStatus.textContent = 'Failed to load release';
+        releaseAutoState = "failed";
+        log("Release check failed: " + e.message);
+        $releaseStatus.textContent = "Failed to load release. Select a local .bin file.";
+        $releaseCard.classList.remove("hidden");
+        updateStartButton();
     }
 }
 
 // --- OTA Transfer ---
 async function startOta() {
-    if (!ctrlChar || !dataChar || !firmware) return;
+    if (!ctrlChar || !dataChar || !firmware || transferring) {
+        return;
+    }
 
-    transferring = true;
-    startTime = Date.now();
-    $progressCard.classList.remove('hidden');
-    $resultCard.classList.add('hidden');
-    $startBtn.disabled = true;
-    $abortBtn.classList.remove('hidden');
-    updateProgress(0);
+    if (!$confirmUpdate.checked) {
+        alert("Please check the confirmation box first.");
+        return;
+    }
 
     const size = firmware.byteLength;
-    log('Starting OTA: ' + formatBytes(size));
+    const summary = [
+        "Start OTA update?",
+        "",
+        "Device: " + (deviceVersion || "(unknown)"),
+        "Target: " + getTargetLabel(),
+        "Size: " + formatBytes(size),
+        "",
+        "Do not power off during update."
+    ].join("\n");
+
+    if (!window.confirm(summary)) {
+        log("Update canceled by user before START command.");
+        return;
+    }
+
+    startTime = Date.now();
+    $progressCard.classList.remove("hidden");
+    $resultCard.classList.add("hidden");
+    resetProgressView();
+    setProgressState("Preparing upload...", false);
+    setTransferringUi(true);
+    updateConnectionDot(true);
+    log("Starting OTA: " + formatBytes(size));
 
     try {
-        // Send START command: [0x01, size(4B little-endian)]
         const startCmd = new Uint8Array(5);
         startCmd[0] = CMD_START;
         startCmd[1] = size & 0xFF;
@@ -323,68 +465,70 @@ async function startOta() {
         startCmd[3] = (size >> 16) & 0xFF;
         startCmd[4] = (size >> 24) & 0xFF;
         await ctrlChar.writeValue(startCmd);
-        log('START sent, size=' + size);
+        log("START sent, size=" + size);
 
-        // Send firmware in chunks
-        const data = new Uint8Array(firmware);
+        setProgressState("Uploading firmware...", false);
+        const bytes = new Uint8Array(firmware);
         let offset = 0;
+
         while (offset < size && transferring) {
             const end = Math.min(offset + CHUNK_SIZE, size);
-            const chunk = data.slice(offset, end);
+            const chunk = bytes.slice(offset, end);
             await dataChar.writeValueWithoutResponse(chunk);
             offset = end;
 
-            // Local progress update (server notifies every 5%)
             const localPct = Math.round(offset / size * 100);
             updateProgress(localPct);
         }
 
         if (!transferring) {
-            log('Transfer aborted by user');
+            log("Transfer aborted by user.");
             return;
         }
 
-        // Send END command
-        log('All chunks sent, sending END...');
+        log("All chunks sent. Sending END...");
+        setProgressState("Upload done. Waiting for validation...", false);
         await ctrlChar.writeValue(new Uint8Array([CMD_END]));
-
     } catch (e) {
-        transferring = false;
-        log('Transfer error: ' + e.message);
-        showResult('Transfer failed: ' + e.message, true);
+        setTransferringUi(false);
+        updateConnectionDot(true);
+        setProgressState("Transfer failed", true);
+        log("Transfer error: " + e.message);
+        showResult("Transfer failed: " + e.message, true);
     }
 }
 
 async function abortOta() {
-    transferring = false;
+    setTransferringUi(false);
+    updateConnectionDot(!!ctrlChar);
+    setProgressState("Aborted by user", true);
+
     if (ctrlChar) {
         try {
             await ctrlChar.writeValue(new Uint8Array([CMD_ABORT]));
-            log('Abort sent');
+            log("Abort sent");
         } catch (e) {
-            log('Abort send failed: ' + e.message);
+            log("Abort send failed: " + e.message);
         }
     }
-    $abortBtn.classList.add('hidden');
-    updateStartButton();
-    showResult('Update aborted', true);
+
+    showResult("Update aborted", true);
 }
 
 function showResult(msg, isError) {
-    $progressCard.classList.add('hidden');
-    $resultCard.classList.remove('hidden');
-    $abortBtn.classList.add('hidden');
-    $resultMsg.className = isError ? 'err' : 'ok';
+    $resultCard.classList.remove("hidden");
+    $resultMsg.className = isError ? "err" : "ok";
     $resultMsg.textContent = msg;
     updateStartButton();
 }
 
 // --- Init ---
-$connectBtn.addEventListener('click', connect);
-$disconnectBtn.addEventListener('click', disconnect);
-$fileInput.addEventListener('change', onFileSelect);
-$startBtn.addEventListener('click', startOta);
-$abortBtn.addEventListener('click', abortOta);
+$connectBtn.addEventListener("click", connect);
+$disconnectBtn.addEventListener("click", disconnect);
+$fileInput.addEventListener("change", onFileSelect);
+$confirmUpdate.addEventListener("change", updateStartButton);
+$startBtn.addEventListener("click", startOta);
+$abortBtn.addEventListener("click", abortOta);
 
-// Auto-fetch latest release on page load
+resetProgressView();
 checkRelease();

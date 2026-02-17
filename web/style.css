@@ -125,6 +125,25 @@ h2 { color: #53a8b6; font-size: 16px; margin-bottom: 12px; }
 .err { color: #ff6b6b; font-size: 14px; }
 
 .file-info { color: #888; font-size: 12px; margin: 6px 0; }
+.confirm-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 8px 0 10px;
+    font-size: 12px;
+    color: #b7b7b7;
+}
+.confirm-row input {
+    margin-top: 2px;
+}
+
+.progress-state {
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: #53a8b6;
+}
+.progress-state.ok { color: #6bcb77; }
+.progress-state.error { color: #ff6b6b; }
 
 .hidden { display: none; }
 

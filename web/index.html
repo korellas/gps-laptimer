@@ -35,6 +35,10 @@
 <div class="card">
     <div class="card-title">Firmware</div>
     <div class="file-info" id="fileInfo"></div>
+    <label class="confirm-row">
+        <input type="checkbox" id="confirmUpdate">
+        <span>I reviewed this firmware and want to start OTA manually.</span>
+    </label>
     <button class="btn" id="startBtn" disabled style="margin-top:4px">Loading firmware...</button>
     <button class="btn btn-secondary hidden" id="abortBtn" style="margin-top:6px">Abort</button>
     <div class="warn">Do not disconnect power during update!</div>
@@ -46,6 +50,7 @@
 <!-- Progress -->
 <div class="card hidden" id="progressCard">
     <div class="card-title">Update Progress</div>
+    <div class="progress-state" id="progressState">Ready</div>
     <div class="progress-bar">
         <div class="progress-fill" id="progressFill"></div>
         <div class="progress-text" id="progressPct">0%</div>
