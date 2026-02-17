@@ -391,10 +391,11 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg)
             s_connHandle = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected, handle=%d", s_connHandle);
             struct ble_gap_upd_params upd = {};
-            upd.itvl_min = 6;
-            upd.itvl_max = 6;
+            // Use less aggressive interval to improve Web Bluetooth stability.
+            upd.itvl_min = 12;   // 15ms
+            upd.itvl_max = 24;   // 30ms
             upd.latency = 0;
-            upd.supervision_timeout = 500;
+            upd.supervision_timeout = 1000; // 10s
             ble_gap_update_params(s_connHandle, &upd);
         } else {
             startAdvertising();
@@ -563,6 +564,7 @@ static esp_err_t startOtaWorkerTask(void)
             continue;
         }
 
+        s_otaWorkerStackBytes = stackBytes;
         TaskHandle_t h = xTaskCreateStaticPinnedToCore(
             otaWorkerTask,
             "ota_worker",
@@ -581,7 +583,6 @@ static esp_err_t startOtaWorkerTask(void)
 
         s_otaWorkerStack = stackMem;
         s_otaWorkerTcb = tcbMem;
-        s_otaWorkerStackBytes = stackBytes;
         s_otaWorkerHandle = h;
         ESP_LOGI(TAG, "ota_worker created (core=%ld, stack=%lu bytes, internal=%d)",
                  (long)workerCore,

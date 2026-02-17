@@ -26,8 +26,12 @@ const STATE_VALIDATING = 2;
 const STATE_COMPLETE = 3;
 const STATE_ERROR = 4;
 
-// Chunk size for BLE transfer
-const CHUNK_SIZE = 512;
+// Chunk size for BLE transfer.
+// 244-byte payload is conservative and generally more stable on Web Bluetooth stacks.
+const CHUNK_SIZE = 244;
+const WRITE_RETRY_MAX = 5;
+const WRITE_RETRY_DELAY_MS = 20;
+const WRITE_YIELD_EVERY = 20;
 
 // GitHub repo for release downloads
 const GITHUB_REPO = "korellas/gps-laptimer";
@@ -95,6 +99,12 @@ function formatError(err) {
         return err.message;
     }
     return String(err);
+}
+
+function sleep(ms) {
+    return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+    });
 }
 
 function decodeOtaError(code) {
@@ -595,12 +605,35 @@ async function startOta() {
         setProgressState("Uploading firmware...", false);
         const bytes = new Uint8Array(firmware);
         let offset = 0;
+        let sentChunks = 0;
 
         while (offset < size && transferring) {
             const end = Math.min(offset + CHUNK_SIZE, size);
             const chunk = bytes.slice(offset, end);
-            await dataChar.writeValueWithoutResponse(chunk);
+            let written = false;
+            for (let attempt = 1; attempt <= WRITE_RETRY_MAX; attempt += 1) {
+                try {
+                    await dataChar.writeValueWithoutResponse(chunk);
+                    written = true;
+                    break;
+                } catch (err) {
+                    if (attempt === WRITE_RETRY_MAX) {
+                        throw err;
+                    }
+                    log("Chunk write retry " + attempt + "/" + WRITE_RETRY_MAX + ": " + formatError(err));
+                    await sleep(WRITE_RETRY_DELAY_MS * attempt);
+                }
+            }
+            if (!written) {
+                throw new Error("Failed to write chunk");
+            }
+
             offset = end;
+            sentChunks += 1;
+
+            if ((sentChunks % WRITE_YIELD_EVERY) === 0) {
+                await sleep(0);
+            }
 
             const localPct = Math.round(offset / size * 100);
             updateProgress(localPct);
