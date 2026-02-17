@@ -33,6 +33,7 @@
 #include "esp_http_server.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 
 #include "dns_server.h"
@@ -415,12 +416,19 @@ static esp_err_t handleCaptiveCheck(httpd_req_t *req)
 static void initHttpServer(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 12;
+    config.max_open_sockets = 3;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.stack_size = 8192;
+    config.stack_size = 4096;
+
+    ESP_LOGI(TAG, "HTTP pre-start: int_free=%lu largest=%lu",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     if (httpd_start(&s_httpServer, &config) != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP server start failed");
+        ESP_LOGE(TAG, "HTTP server start failed (int_free=%lu largest=%lu)",
+                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return;
     }
 
@@ -583,11 +591,23 @@ static void wifiEventHandler(void *arg, esp_event_base_t event_base,
 {
     if (event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
-        ESP_LOGI(TAG, "Client connected, AID=%d", event->aid);
+        ESP_LOGI(TAG, "Client connected, AID=%d (int_free=%lu int_largest=%lu)",
+                 event->aid,
+                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         updateActivity();
     } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
         ESP_LOGI(TAG, "Client disconnected, AID=%d", event->aid);
+    }
+}
+
+static void ipEventHandler(void *arg, esp_event_base_t event_base,
+                            int32_t event_id, void *event_data)
+{
+    if (event_id == IP_EVENT_AP_STAIPASSIGNED) {
+        ip_event_ap_staipassigned_t *event = (ip_event_ap_staipassigned_t *)event_data;
+        ESP_LOGI(TAG, "DHCP assigned IP: " IPSTR " to client", IP2STR(&event->ip));
     }
 }
 
@@ -605,6 +625,8 @@ static void initWifiDriver(void)
 
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifiEventHandler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &ipEventHandler, NULL, NULL));
 
     s_wifiInitialized = true;
 }
@@ -618,11 +640,30 @@ static void startSoftAP(void)
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_OPEN;
 
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "SoftAP started: SSID=LAPTIMER (open)");
+    // DHCP 서버 명시적 재시작 (부팅 시 auto-start 후 응답 안 하는 문제 대응)
+    if (s_apNetif) {
+        esp_netif_dhcps_stop(s_apNetif);
+        esp_err_t err = esp_netif_dhcps_start(s_apNetif);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "DHCP server restart failed: %s", esp_err_to_name(err));
+        } else {
+            esp_netif_ip_info_t ip_info;
+            esp_netif_get_ip_info(s_apNetif, &ip_info);
+            ESP_LOGI(TAG, "DHCP server restarted (IP: " IPSTR ")", IP2STR(&ip_info.ip));
+        }
+    }
+
+    // WiFi 전력절약 끄기 (DHCP 패킷 드롭 방지)
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    ESP_LOGI(TAG, "SoftAP started: SSID=LAPTIMER (open), int_free=%lu, int_largest=%lu",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
 // ============================================================
@@ -712,13 +753,13 @@ void startWifiPortal(void)
     // SoftAP 시작
     startSoftAP();
 
+    // HTTP + WebSocket 서버 (DNS보다 먼저 — 내부 RAM 여유 확보)
+    initHttpServer();
+
     // DNS 리다이렉트 시작 (모든 도메인 -> AP IP)
     dns_server_config_t dns_config = DNS_SERVER_CONFIG_SINGLE("*", "WIFI_AP_DEF");
     s_dnsHandle = start_dns_server(&dns_config);
     ESP_LOGI(TAG, "DNS redirect server started");
-
-    // HTTP + WebSocket 서버
-    initHttpServer();
 
     // 로그 후킹 (esp_log 출력을 링 버퍼로 복사)
     if (!s_origVprintf) {

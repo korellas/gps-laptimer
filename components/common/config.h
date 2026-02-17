@@ -38,7 +38,7 @@ constexpr unsigned long POWER_OFF_HOLD_MS = 2000;  // 2초 길게 누르면 전�
 
 // Battery ADC (GPIO4 = ADC1_CHANNEL_3, 전압 분배기 3:1)
 constexpr float BATTERY_DIVIDER_FACTOR = 3.0f;
-constexpr unsigned long BATTERY_READ_INTERVAL_MS = 2000;  // 2초마다 측정
+constexpr unsigned long BATTERY_READ_INTERVAL_MS = 60000;  // 60초마다 측정
 
 // GPS UART Settings — baud rate 상수는 ublox_gps.h에 정의
 // (UBLOX_BAUD_INIT = 9600, UBLOX_BAUD_TARGET = 115200)

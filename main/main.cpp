@@ -46,6 +46,7 @@
 #include "wifi_portal.h"
 #include "esp_pm.h"
 #include "esp_wifi.h"
+#include "esp_heap_caps.h"
 #include "ota_manager.h"
 #include <sys/time.h>      // settimeofday()
 #include <time.h>          // time(), localtime()
@@ -54,6 +55,12 @@
 #include "sdcard_manager.h"
 
 static const char *TAG = "MAIN";
+
+// 내부 RAM 진단 매크로
+#define LOG_INTRAM(label) \
+    ESP_LOGI(TAG, "INTRAM[%-16s] free=%6lu largest=%6lu", label, \
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT), \
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT))
 
 // Runtime debug output flag (default: off for clean console)
 bool g_debugOutput = false;
@@ -174,123 +181,91 @@ static void initBatteryADC(void)
     ESP_LOGI(TAG, "Battery ADC: OK (GPIO4, cali=%s)", s_adcCaliEnabled ? "yes" : "no");
 }
 
-// 배터리 ADC 전용 FreeRTOS task
-// 메인루프에서 완전 분리 — busy-wait 딜레이가 메인루프에 영향 0%
-static void batteryTask(void *arg)
+// 배터리 ADC 측정 (main loop에서 60초마다 호출, ~2.6ms 소요)
+static void readBattery(void)
 {
+    if (!s_adcHandle) return;
+
     static constexpr int ADC_TOTAL_READS = 13;  // 1 dummy + 12 samples
     static constexpr int ADC_SAMPLES = 12;
     static constexpr int ADC_TRIM = 4;           // 상하 각 4개 버림 → 중앙 4개 평균
-    static unsigned long lastDebugMs = 0;
 
-    // ADC 준비 대기
-    while (!s_adcHandle) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+    int allRaw[ADC_TOTAL_READS];
+    int readCount = 0;
+
+    for (int i = 0; i < ADC_TOTAL_READS; i++) {
+        int raw = 0;
+        if (adc_oneshot_read(s_adcHandle, ADC_CHANNEL_3, &raw) == ESP_OK) {
+            allRaw[readCount++] = raw;
+        }
+        if (i < ADC_TOTAL_READS - 1) {
+            ets_delay_us(200);
+        }
     }
 
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(BATTERY_READ_INTERVAL_MS));
+    if (readCount < 7) return;
 
-        int allRaw[ADC_TOTAL_READS];
-        int readCount = 0;
+    int samples[ADC_SAMPLES];
+    int validCount = (readCount - 1 > ADC_SAMPLES) ? ADC_SAMPLES : (readCount - 1);
+    for (int i = 0; i < validCount; i++) {
+        samples[i] = allRaw[i + 1];  // allRaw[0]은 dummy read, 버림
+    }
 
-        // 13회 측정 (200µs 간격, 이 task만 block)
-        for (int i = 0; i < ADC_TOTAL_READS; i++) {
-            int raw = 0;
-            if (adc_oneshot_read(s_adcHandle, ADC_CHANNEL_3, &raw) == ESP_OK) {
-                allRaw[readCount++] = raw;
-            }
-            if (i < ADC_TOTAL_READS - 1) {
-                ets_delay_us(200);
-            }
+    // 삽입 정렬
+    for (int i = 1; i < validCount; i++) {
+        int key = samples[i];
+        int j = i - 1;
+        while (j >= 0 && samples[j] > key) {
+            samples[j + 1] = samples[j];
+            j--;
         }
+        samples[j + 1] = key;
+    }
 
-        if (readCount < 7) continue;
+    // 상하 trim 후 중앙 평균
+    int trimLow = ADC_TRIM;
+    int trimHigh = validCount - ADC_TRIM;
+    if (trimHigh <= trimLow) { trimLow = 0; trimHigh = validCount; }
 
-        int dummyRaw = allRaw[0];
+    int sum = 0;
+    for (int i = trimLow; i < trimHigh; i++) {
+        sum += samples[i];
+    }
+    float avgRaw = (float)sum / (float)(trimHigh - trimLow);
 
-        int samples[ADC_SAMPLES];
-        int validCount = (readCount - 1 > ADC_SAMPLES) ? ADC_SAMPLES : (readCount - 1);
-        for (int i = 0; i < validCount; i++) {
-            samples[i] = allRaw[i + 1];
-        }
-
-        // 삽입 정렬
-        for (int i = 1; i < validCount; i++) {
-            int key = samples[i];
-            int j = i - 1;
-            while (j >= 0 && samples[j] > key) {
-                samples[j + 1] = samples[j];
-                j--;
-            }
-            samples[j + 1] = key;
-        }
-
-        // 상하 trim 후 중앙 평균
-        int trimLow = ADC_TRIM;
-        int trimHigh = validCount - ADC_TRIM;
-        if (trimHigh <= trimLow) { trimLow = 0; trimHigh = validCount; }
-
-        int sum = 0;
-        for (int i = trimLow; i < trimHigh; i++) {
-            sum += samples[i];
-        }
-        float avgRaw = (float)sum / (float)(trimHigh - trimLow);
-
-        // calibration은 int만 받으므로 반올림 후 전달, 최종 전압은 float 평균 기반
-        float voltage = 0.0f;
+    float voltage = 0.0f;
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-        if (s_adcCaliEnabled && s_adcCaliHandle) {
-            int mv = 0;
-            if (adc_cali_raw_to_voltage(s_adcCaliHandle, (int)(avgRaw + 0.5f), &mv) == ESP_OK) {
-                voltage = mv / 1000.0f;
-            } else {
-                voltage = avgRaw / 4095.0f * 3.3f;
-            }
-        } else
-#endif
-        {
+    if (s_adcCaliEnabled && s_adcCaliHandle) {
+        int mv = 0;
+        if (adc_cali_raw_to_voltage(s_adcCaliHandle, (int)(avgRaw + 0.5f), &mv) == ESP_OK) {
+            voltage = mv / 1000.0f;
+        } else {
             voltage = avgRaw / 4095.0f * 3.3f;
         }
-
-        float rawBatteryV = voltage * BATTERY_DIVIDER_FACTOR;
-
-        // gApp float 쓰기는 ESP32에서 atomic (단일 writer)
-        gApp.batteryVoltage = rawBatteryV;
-        gApp.batteryPercent = voltageToPercent(rawBatteryV);
-
-        // 저전압 자동 셧다운: 3.5V 연속 3회
-        if (rawBatteryV <= BATTERY_SHUTDOWN_VOLTAGE) {
-            s_lowVoltageCount++;
-            if (s_lowVoltageCount >= BATTERY_SHUTDOWN_COUNT) {
-                ESP_LOGW(TAG, "Battery critical: %.3fV (%d consecutive) - shutting down",
-                         rawBatteryV, s_lowVoltageCount);
-                systemPowerOff();
-            }
-        } else {
-            s_lowVoltageCount = 0;
-        }
-
-        // 디버그 로그: 10초마다
-        unsigned long now = millis();
-        if (now - lastDebugMs >= 10000) {
-            lastDebugMs = now;
-            char sampleBuf[160];
-            int pos = snprintf(sampleBuf, sizeof(sampleBuf), "{%d} ", dummyRaw);
-            for (int i = 0; i < validCount && pos < 150; i++) {
-                bool trimmed = (i < trimLow || i >= trimHigh);
-                pos += snprintf(sampleBuf + pos, sizeof(sampleBuf) - pos,
-                               "%s%d%s ", trimmed ? "[" : "", samples[i], trimmed ? "]" : "");
-            }
-            ESP_LOGI(TAG, "BAT %s-> avg=%.1f  %.3fV %.1f%%",
-                     sampleBuf, avgRaw, rawBatteryV, gApp.batteryPercent);
-        }
+    } else
+#endif
+    {
+        voltage = avgRaw / 4095.0f * 3.3f;
     }
-}
 
-static void startBatteryTask(void)
-{
-    xTaskCreatePinnedToCore(batteryTask, "battery", 4096, NULL, 1, NULL, 1);
+    float rawBatteryV = voltage * BATTERY_DIVIDER_FACTOR;
+
+    gApp.batteryVoltage = rawBatteryV;
+    gApp.batteryPercent = voltageToPercent(rawBatteryV);
+
+    // 저전압 자동 셧다운: 3.5V 연속 3회
+    if (rawBatteryV <= BATTERY_SHUTDOWN_VOLTAGE) {
+        s_lowVoltageCount++;
+        if (s_lowVoltageCount >= BATTERY_SHUTDOWN_COUNT) {
+            ESP_LOGW(TAG, "Battery critical: %.3fV (%d consecutive) - shutting down",
+                     rawBatteryV, s_lowVoltageCount);
+            systemPowerOff();
+        }
+    } else {
+        s_lowVoltageCount = 0;
+    }
+
+    ESP_LOGI(TAG, "BAT %.3fV %.1f%%", rawBatteryV, gApp.batteryPercent);
 }
 
 // ============================================================
@@ -674,6 +649,8 @@ static void init_storage(void) {
 }
 
 static void app_init(void) {
+    LOG_INTRAM("boot");
+
     // 전원 래치 즉시 실행 (배터리 모드: 버튼 놓기 전에 SYS_EN 래치 필요)
     initPowerLatch();
 
@@ -685,6 +662,7 @@ static void app_init(void) {
     setupUI();
     createStartupScreen();
     ESP_LOGI(TAG, "Display: OK");
+    LOG_INTRAM("display");
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  GPS Lap Timer %s (ESP-IDF)", APP_VERSION);
@@ -708,6 +686,7 @@ static void app_init(void) {
 
     // Initialize storage (NVS + SPIFFS + SD card)
     init_storage();
+    LOG_INTRAM("storage");
 
     // Initialize lap storage
     if (!initLapStorage()) {
@@ -715,13 +694,34 @@ static void app_init(void) {
     } else {
         ESP_LOGI(TAG, "Storage: OK");
     }
+    LOG_INTRAM("lap_storage");
 
     // SPIFFS에서 설정 로드 (phoneNumber 등)
     loadSettings();
 
+    // SD 카드 읽기는 WiFi 시작 전에 수행 (WiFi가 내부 RAM을 많이 차지하므로)
+    // Load reference lap
+    ESP_LOGI(TAG, "Loading reference lap...");
+    if (loadReferenceLapFromStorage()) {
+        ESP_LOGI(TAG, "  From storage: %d pts, %.2fs (BEST)",
+                 (int)gApp.referenceLap.points.size(), gApp.referenceLap.totalTimeMs / 1000.0f);
+        gApp.hasValidReferenceLap = true;
+    } else {
+        ESP_LOGI(TAG, "  No saved reference - starting fresh");
+        gApp.hasValidReferenceLap = false;
+        gApp.bestLapTimeMs = UINT32_MAX;
+    }
+
+    // Get session number
+    gApp.currentSessionNumber = getNextSessionId();
+    ESP_LOGI(TAG, "Session: %u", gApp.currentSessionNumber);
+    LOG_INTRAM("pre-wifi");
+
     // WiFi 초기화 + 시작 (시작 화면 동안 ON, 레이스 진입 시 클라이언트 없으면 OFF)
     initWifiPortal();
+    LOG_INTRAM("wifi-init");
     startWifiPortal();
+    LOG_INTRAM("wifi-started");
 
     // Initialize finish line detection
     initFinishLine();
@@ -767,28 +767,12 @@ static void app_init(void) {
     gpio_set_level((gpio_num_t)GPS_ENABLE_PIN, 0);
     ESP_LOGI(TAG, "GPS module: OFF (deferred init)");
 
-    // Load reference lap
-    ESP_LOGI(TAG, "Loading reference lap...");
-    if (loadReferenceLapFromStorage()) {
-        ESP_LOGI(TAG, "  From storage: %d pts, %.2fs (BEST)",
-                 (int)gApp.referenceLap.points.size(), gApp.referenceLap.totalTimeMs / 1000.0f);
-        gApp.hasValidReferenceLap = true;
-    } else {
-        ESP_LOGI(TAG, "  No saved reference - starting fresh");
-        gApp.hasValidReferenceLap = false;
-        gApp.bestLapTimeMs = UINT32_MAX;
-    }
-
-    // Get session number
-    gApp.currentSessionNumber = getNextSessionId();
-    ESP_LOGI(TAG, "Session: %u", gApp.currentSessionNumber);
-
     // 모드 초기화는 시작 화면에서 모드 선택 후 수행
     resetDeltaHistory();
 
-    // Initialize battery ADC (GPIO4) + 전용 task 시작
+    // Initialize battery ADC (GPIO4) + 최초 1회 측정
     initBatteryADC();
-    startBatteryTask();
+    readBattery();
 
     // IMU 태스크 시작 (100Hz 읽기 + 자동 캘리브레이션)
     startImuTask();
@@ -842,6 +826,7 @@ static void main_task(void *pvParameters) {
     app_init();
 
     unsigned long lastDisplayUpdate = 0;
+    unsigned long lastBatteryRead = 0;
     bool modeInitialized = false;
 
     while (1) {
@@ -893,6 +878,12 @@ static void main_task(void *pvParameters) {
         if (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL_MS) {
             displayLoop();
             lastDisplayUpdate = now;
+        }
+
+        // 배터리 측정 (60초마다, ~2.6ms 소요)
+        if (now - lastBatteryRead >= BATTERY_READ_INTERVAL_MS) {
+            readBattery();
+            lastBatteryRead = now;
         }
 
         // Yield to other tasks
