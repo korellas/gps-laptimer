@@ -49,18 +49,18 @@ jobs:
           fi
 
           TAG=$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty')
-          ASSET_API_URL=$(echo "${RELEASE_JSON}" | jq -r '.assets[] | select(.name=="gps_laptimer.bin") | .url' | head -n 1 || true)
+          ASSET_URL=$(echo "${RELEASE_JSON}" | jq -r '.assets[] | select(.name=="gps_laptimer.bin") | .browser_download_url' | head -n 1 || true)
           ASSET_SIZE=$(echo "${RELEASE_JSON}" | jq -r '.assets[] | select(.name=="gps_laptimer.bin") | .size' | head -n 1 || true)
 
-          if [ -z "${ASSET_API_URL}" ]; then
+          if [ -z "${ASSET_URL}" ]; then
             echo "No gps_laptimer.bin in latest release. Continue without bundled firmware."
             exit 0
           fi
 
           curl -fLsS \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/octet-stream" \
-            "${ASSET_API_URL}" \
+            --retry 3 \
+            --retry-all-errors \
+            "${ASSET_URL}" \
             -o web/firmware/latest/gps_laptimer.bin
 
           ACTUAL_SIZE=$(wc -c < web/firmware/latest/gps_laptimer.bin | tr -d ' ')
