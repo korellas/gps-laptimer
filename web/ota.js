@@ -32,6 +32,7 @@ const CHUNK_SIZE = 244;
 const WRITE_RETRY_MAX = 5;
 const WRITE_RETRY_DELAY_MS = 20;
 const WRITE_YIELD_EVERY = 20;
+const CONTROL_RETRY_MAX = 3;
 
 // GitHub repo for release downloads
 const GITHUB_REPO = "korellas/gps-laptimer";
@@ -80,6 +81,7 @@ let startTime = 0;
 let releaseAutoState = "loading"; // loading | ready | unavailable | failed
 let latestOtaState = STATE_IDLE;
 let latestOtaErrorCode = 0;
+let lastVersionNote = "";
 
 // --- Logging ---
 function log(msg) {
@@ -105,6 +107,32 @@ function sleep(ms) {
     return new Promise(function (resolve) {
         setTimeout(resolve, ms);
     });
+}
+
+async function writeControlWithRetry(payload, label) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= CONTROL_RETRY_MAX; attempt += 1) {
+        try {
+            await ctrlChar.writeValue(payload);
+            return;
+        } catch (err) {
+            lastErr = err;
+            if (attempt === CONTROL_RETRY_MAX) {
+                break;
+            }
+            log(label + " retry " + attempt + "/" + CONTROL_RETRY_MAX + ": " + formatError(err));
+            await sleep(WRITE_RETRY_DELAY_MS * attempt);
+        }
+    }
+    throw lastErr || new Error(label + " failed");
+}
+
+async function writeDataChunk(chunk) {
+    if (dataChar && dataChar.properties && dataChar.properties.write) {
+        await dataChar.writeValue(chunk);
+    } else {
+        await dataChar.writeValueWithoutResponse(chunk);
+    }
 }
 
 function decodeOtaError(code) {
@@ -179,6 +207,51 @@ function getTargetLabel() {
     return "selected firmware";
 }
 
+function parseVersion(input) {
+    if (!input) {
+        return null;
+    }
+    const m = String(input).match(/(\d+)\.(\d+)\.(\d+)/);
+    if (!m) {
+        return null;
+    }
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function compareVersions(a, b) {
+    const va = parseVersion(a);
+    const vb = parseVersion(b);
+    if (!va || !vb) {
+        return null;
+    }
+    for (let i = 0; i < 3; i += 1) {
+        if (va[i] > vb[i]) {
+            return 1;
+        }
+        if (va[i] < vb[i]) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+function buildVersionNote() {
+    if (!deviceVersion || !releaseVersion) {
+        return "";
+    }
+    const cmp = compareVersions(releaseVersion, deviceVersion);
+    if (cmp === 0) {
+        return "same version";
+    }
+    if (cmp === null) {
+        return "version compare unavailable";
+    }
+    if (cmp < 0) {
+        return "target is lower (downgrade)";
+    }
+    return "target is newer";
+}
+
 function setFirmwareLoaded(buffer, name, source) {
     firmware = buffer;
     firmwareName = name || "gps_laptimer.bin";
@@ -224,7 +297,7 @@ async function connect() {
 
         setConnected(true);
         log("Connected. Requesting device version...");
-        await ctrlChar.writeValue(new Uint8Array([CMD_VERSION]));
+        await writeControlWithRetry(new Uint8Array([CMD_VERSION]), "VERSION");
     } catch (e) {
         log("Error: " + e.message);
         setConnected(false);
@@ -286,12 +359,6 @@ function updateStartButton() {
         return;
     }
 
-    if (releaseVersion && deviceVersion && deviceVersion === releaseVersion) {
-        $startBtn.disabled = true;
-        $startBtn.textContent = "Already up to date (" + deviceVersion + ")";
-        return;
-    }
-
     if (!connected) {
         $startBtn.disabled = true;
         $startBtn.textContent = "Connect device first";
@@ -305,8 +372,10 @@ function updateStartButton() {
     }
 
     $startBtn.disabled = false;
+    const note = buildVersionNote();
     if (releaseVersion && deviceVersion) {
-        $startBtn.textContent = "Start Update " + deviceVersion + " -> " + releaseVersion;
+        $startBtn.textContent =
+            "Start Update " + deviceVersion + " -> " + releaseVersion + (note ? " (" + note + ")" : "");
     } else if (releaseVersion) {
         $startBtn.textContent = "Start Update to " + releaseVersion;
     } else {
@@ -338,12 +407,17 @@ function onStatusNotify(event) {
         deviceVersion = version;
         $devVersion.textContent = version;
         log("Device version: " + version);
+        const note = buildVersionNote();
+        if (note && note !== lastVersionNote) {
+            log("Version note: " + note + " (update is still allowed)");
+            lastVersionNote = note;
+        }
         updateStartButton();
     }
 
     if (state === STATE_RECEIVING) {
         $progressCard.classList.remove("hidden");
-        setProgressState("Uploading firmware...", false);
+        setProgressState("Step 3/4: Uploading browser -> device over BLE...", false);
         updateProgress(progress);
         return;
     }
@@ -351,8 +425,8 @@ function onStatusNotify(event) {
     if (state === STATE_VALIDATING) {
         $progressCard.classList.remove("hidden");
         updateProgress(100);
-        setProgressState("Validating firmware on device...", false);
-        log("Validating firmware...");
+        setProgressState("Step 4/4: Device validating firmware...", false);
+        log("[STEP 4/4] Device validating firmware...");
         return;
     }
 
@@ -360,8 +434,8 @@ function onStatusNotify(event) {
         setTransferringUi(false);
         updateConnectionDot(true);
         updateProgress(100);
-        setProgressState("Complete. Device rebooting...", false);
-        log("OTA complete. Device is rebooting...");
+        setProgressState("Complete: Device accepted firmware and will reboot.", false);
+        log("OTA complete. Device accepted firmware and is rebooting.");
         showResult("Update successful! Device is rebooting.", false);
         resetConfirmation();
         return;
@@ -496,7 +570,7 @@ async function checkRelease() {
         $releaseCard.classList.remove("hidden");
 
         log("Latest release: " + rel.tag_name + " (" + formatBytes(asset.size) + ")");
-        $releaseStatus.textContent = "Downloading firmware package (same-origin preferred)...";
+        $releaseStatus.textContent = "Step 1/4: Downloading firmware package to browser...";
 
         const attemptErrors = [];
         let fwBuffer = null;
@@ -521,9 +595,10 @@ async function checkRelease() {
         }
 
         $releaseStatus.textContent =
-            "Firmware ready from " + firmwareSource + ". Update starts only after manual confirmation + Start button.";
+            "Step 1/4 complete: firmware downloaded to browser (" + firmwareSource + "). "
+            + "Next: connect device, confirm, then Start to upload browser -> device.";
         resetConfirmation();
-        log("Firmware ready: " + formatBytes(firmware.byteLength));
+        log("[STEP 1/4] Firmware downloaded to browser: " + formatBytes(firmware.byteLength));
     } catch (e) {
         releaseAutoState = "failed";
         log("Release check failed: " + formatError(e));
@@ -554,9 +629,11 @@ async function startOta() {
         "",
         "Device: " + (deviceVersion || "(unknown)"),
         "Target: " + getTargetLabel(),
+        "Version note: " + (buildVersionNote() || "not available"),
         "Size: " + formatBytes(size),
         "",
-        "Do not power off during update."
+        "Do not power off during update.",
+        "Flow: browser download -> BLE upload to device flash"
     ].join("\n");
 
     if (!window.confirm(summary)) {
@@ -568,10 +645,10 @@ async function startOta() {
     $progressCard.classList.remove("hidden");
     $resultCard.classList.add("hidden");
     resetProgressView();
-    setProgressState("Preparing upload...", false);
+    setProgressState("Step 2/4: Sending START command to device...", false);
     setTransferringUi(true);
     updateConnectionDot(true);
-    log("Starting OTA: " + formatBytes(size));
+    log("[STEP 2/4] Starting BLE OTA upload to device: " + formatBytes(size));
 
     try {
         const startCmd = new Uint8Array(5);
@@ -580,9 +657,9 @@ async function startOta() {
         startCmd[2] = (size >> 8) & 0xFF;
         startCmd[3] = (size >> 16) & 0xFF;
         startCmd[4] = (size >> 24) & 0xFF;
-        await ctrlChar.writeValue(startCmd);
-        log("START sent, size=" + size);
-        setProgressState("Preparing device flash...", false);
+        await writeControlWithRetry(startCmd, "START");
+        log("[STEP 2/4] START sent to device, size=" + size);
+        setProgressState("Step 2/4: Device preparing OTA partition...", false);
 
         const startWaitBegin = Date.now();
         while (Date.now() - startWaitBegin < 30000) {
@@ -600,9 +677,13 @@ async function startOta() {
         if (latestOtaState !== STATE_RECEIVING) {
             throw new Error("Timeout waiting for device to enter RECEIVING state");
         }
-        log("Device accepted START and entered RECEIVING state.");
+        log("[STEP 3/4] Device accepted START. Uploading browser -> device over BLE.");
+        const dataMode = (dataChar.properties && dataChar.properties.write)
+            ? "write-with-response"
+            : "write-without-response";
+        log("Data channel mode: " + dataMode + ", chunk=" + CHUNK_SIZE + " bytes");
 
-        setProgressState("Uploading firmware...", false);
+        setProgressState("Step 3/4: Uploading browser -> device over BLE...", false);
         const bytes = new Uint8Array(firmware);
         let offset = 0;
         let sentChunks = 0;
@@ -613,7 +694,7 @@ async function startOta() {
             let written = false;
             for (let attempt = 1; attempt <= WRITE_RETRY_MAX; attempt += 1) {
                 try {
-                    await dataChar.writeValueWithoutResponse(chunk);
+                    await writeDataChunk(chunk);
                     written = true;
                     break;
                 } catch (err) {
@@ -644,9 +725,10 @@ async function startOta() {
             return;
         }
 
-        log("All chunks sent. Sending END...");
-        setProgressState("Upload done. Waiting for validation...", false);
-        await ctrlChar.writeValue(new Uint8Array([CMD_END]));
+        log("[STEP 3/4] All chunks sent. Sending END...");
+        setProgressState("Step 4/4: Upload complete, waiting device validation...", false);
+        await writeControlWithRetry(new Uint8Array([CMD_END]), "END");
+        log("[STEP 4/4] END sent. Waiting for device validation/complete notify...");
     } catch (e) {
         setTransferringUi(false);
         updateConnectionDot(true);
@@ -663,7 +745,7 @@ async function abortOta() {
 
     if (ctrlChar) {
         try {
-            await ctrlChar.writeValue(new Uint8Array([CMD_ABORT]));
+            await writeControlWithRetry(new Uint8Array([CMD_ABORT]), "ABORT");
             log("Abort sent");
         } catch (e) {
             log("Abort send failed: " + e.message);
