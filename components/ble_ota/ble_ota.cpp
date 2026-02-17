@@ -66,11 +66,10 @@ static constexpr uint32_t NIMBLE_HOST_STACK_WORDS =
     (NIMBLE_HOST_STACK_BYTES + sizeof(StackType_t) - 1U) / sizeof(StackType_t);
 DRAM_ATTR static StackType_t s_hostTaskStack[NIMBLE_HOST_STACK_WORDS];
 DRAM_ATTR static StaticTask_t s_hostTaskTcb;
-static constexpr uint32_t OTA_WORKER_STACK_BYTES = 6144;
-static constexpr uint32_t OTA_WORKER_STACK_WORDS =
-    (OTA_WORKER_STACK_BYTES + sizeof(StackType_t) - 1U) / sizeof(StackType_t);
-DRAM_ATTR static StackType_t s_otaWorkerStack[OTA_WORKER_STACK_WORDS];
-DRAM_ATTR static StaticTask_t s_otaWorkerTcb;
+static StackType_t *s_otaWorkerStack = nullptr;
+static StaticTask_t *s_otaWorkerTcb = nullptr;
+static uint32_t s_otaWorkerStackBytes = 0;
+static bool s_btClassicMemReleased = false;
 
 enum class OtaCmdType : uint8_t {
     START = 1,
@@ -154,7 +153,8 @@ static void otaWorkerTask(void *param)
 {
     s_otaWorkerHandle = xTaskGetCurrentTaskHandle();
     s_otaWorkerRunning = true;
-    ESP_LOGI(TAG, "OTA worker started (free stack: %u)",
+    ESP_LOGI(TAG, "OTA worker started (stack=%lu, free=%u)",
+             (unsigned long)s_otaWorkerStackBytes,
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     OtaCommand cmd = {};
@@ -542,27 +542,61 @@ static esp_err_t startOtaWorkerTask(void)
     const BaseType_t workerCore = CONFIG_BT_NIMBLE_PINNED_TO_CORE;
 #endif
 
-    TaskHandle_t h = xTaskCreateStaticPinnedToCore(
-        otaWorkerTask,
-        "ota_worker",
-        OTA_WORKER_STACK_WORDS,
-        NULL,
-        (configMAX_PRIORITIES - 6),
-        s_otaWorkerStack,
-        &s_otaWorkerTcb,
-        workerCore);
-    if (h == nullptr) {
-        ESP_LOGE(TAG, "Failed to create ota_worker task");
+    const uint32_t stackCandidates[] = {6144, 5120, 4096, 3584, 3072};
+    for (size_t i = 0; i < sizeof(stackCandidates) / sizeof(stackCandidates[0]); ++i) {
+        const uint32_t stackBytes = stackCandidates[i];
+        const uint32_t stackWords =
+            (stackBytes + sizeof(StackType_t) - 1U) / sizeof(StackType_t);
+
+        StackType_t *stackMem = (StackType_t *)heap_caps_malloc(
+            stackWords * sizeof(StackType_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        StaticTask_t *tcbMem = (StaticTask_t *)heap_caps_malloc(
+            sizeof(StaticTask_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (stackMem == nullptr || tcbMem == nullptr) {
+            if (stackMem != nullptr) heap_caps_free(stackMem);
+            if (tcbMem != nullptr) heap_caps_free(tcbMem);
+            ESP_LOGW(TAG, "ota_worker alloc failed (stack=%lu, int_largest=%lu)",
+                     (unsigned long)stackBytes,
+                     (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            continue;
+        }
+
+        TaskHandle_t h = xTaskCreateStaticPinnedToCore(
+            otaWorkerTask,
+            "ota_worker",
+            stackWords,
+            NULL,
+            (configMAX_PRIORITIES - 6),
+            stackMem,
+            tcbMem,
+            workerCore);
+        if (h == nullptr) {
+            heap_caps_free(stackMem);
+            heap_caps_free(tcbMem);
+            ESP_LOGW(TAG, "ota_worker create failed (stack=%lu)", (unsigned long)stackBytes);
+            continue;
+        }
+
+        s_otaWorkerStack = stackMem;
+        s_otaWorkerTcb = tcbMem;
+        s_otaWorkerStackBytes = stackBytes;
+        s_otaWorkerHandle = h;
+        ESP_LOGI(TAG, "ota_worker created (core=%ld, stack=%lu bytes, internal=%d)",
+                 (long)workerCore,
+                 (unsigned long)stackBytes,
+                 (int)esp_ptr_internal(s_otaWorkerStack));
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "Failed to allocate/create ota_worker (int_largest=%lu)",
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (s_otaCmdQueue != nullptr) {
         vQueueDelete(s_otaCmdQueue);
         s_otaCmdQueue = nullptr;
-        return ESP_ERR_NO_MEM;
     }
-    s_otaWorkerHandle = h;
-    ESP_LOGI(TAG, "ota_worker created (core=%ld, stack=%lu bytes, internal=%d)",
-             (long)workerCore,
-             (unsigned long)(OTA_WORKER_STACK_WORDS * sizeof(StackType_t)),
-             (int)esp_ptr_internal(s_otaWorkerStack));
-    return ESP_OK;
+    return ESP_ERR_NO_MEM;
 }
 
 static void stopOtaWorkerTask(void)
@@ -583,6 +617,15 @@ static void stopOtaWorkerTask(void)
         vQueueDelete(s_otaCmdQueue);
         s_otaCmdQueue = nullptr;
     }
+    if (s_otaWorkerStack != nullptr) {
+        heap_caps_free(s_otaWorkerStack);
+        s_otaWorkerStack = nullptr;
+    }
+    if (s_otaWorkerTcb != nullptr) {
+        heap_caps_free(s_otaWorkerTcb);
+        s_otaWorkerTcb = nullptr;
+    }
+    s_otaWorkerStackBytes = 0;
 }
 
 static esp_err_t startNimbleHostTask(void)
@@ -704,12 +747,36 @@ esp_err_t startBleOta(void)
         forceBtControllerIdle();
     }
 
+    if (!s_btClassicMemReleased) {
+        esp_err_t rel = esp_bt_mem_release(ESP_BT_MODE_CLASSIC_BT);
+        if (rel == ESP_OK) {
+            s_btClassicMemReleased = true;
+            ESP_LOGI(TAG, "Released Classic BT memory");
+        } else {
+            ESP_LOGW(TAG, "Classic BT memory release skipped: %s", esp_err_to_name(rel));
+        }
+    }
+
     // 1. NimBLE ?ы듃 珥덇린??(BT 而⑦듃濡ㅻ윭 + HCI + host)
     esp_err_t ret = nimble_port_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "nimble_port_init FAILED: %s", esp_err_to_name(ret));
-        s_starting = false;
-        return ret;
+        ESP_LOGW(TAG, "nimble_port_init attempt1 failed: %s (bt_status=%d int_largest=%lu)",
+                 esp_err_to_name(ret),
+                 (int)esp_bt_controller_get_status(),
+                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        forceBtControllerIdle();
+        vTaskDelay(pdMS_TO_TICKS(30));
+
+        ret = nimble_port_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "nimble_port_init FAILED(retry): %s (bt_status=%d int_largest=%lu)",
+                     esp_err_to_name(ret),
+                     (int)esp_bt_controller_get_status(),
+                     (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            s_starting = false;
+            return ret;
+        }
+        ESP_LOGI(TAG, "nimble_port_init recovered on retry");
     }
     ESP_LOGI(TAG, "[1] nimble_port_init OK (heap: %lu)",
              (unsigned long)esp_get_free_heap_size());
@@ -752,22 +819,21 @@ esp_err_t startBleOta(void)
     }
     ESP_LOGI(TAG, "[2] GATT services OK");
 
-    // 6. NimBLE host task ?쒖옉
-    ESP_LOGI(TAG, "[3] Starting host task (heap: %lu)...",
-             (unsigned long)esp_get_free_heap_size());
-    ret = startNimbleHostTask();
+    // 6. OTA worker (flash ops off NimBLE callback context)
+    ret = startOtaWorkerTask();
     if (ret != ESP_OK) {
         (void)nimble_port_deinit();
-        freeNimbleHostTaskBuffers();
         forceBtControllerIdle();
         s_starting = false;
         return ret;
     }
 
-    ret = startOtaWorkerTask();
+    // 7. NimBLE host task ?쒖옉
+    ESP_LOGI(TAG, "[3] Starting host task (heap: %lu)...",
+             (unsigned long)esp_get_free_heap_size());
+    ret = startNimbleHostTask();
     if (ret != ESP_OK) {
-        (void)nimble_port_stop();
-        (void)waitForFalse(s_hostTaskRunning, HOST_TASK_STOP_TIMEOUT_TICKS);
+        stopOtaWorkerTask();
         (void)nimble_port_deinit();
         freeNimbleHostTaskBuffers();
         forceBtControllerIdle();
