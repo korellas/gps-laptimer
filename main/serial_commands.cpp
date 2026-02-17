@@ -454,11 +454,15 @@ void handleSerialCommands(void) {
         case 'b':
         case 'B':
             if (isBleOtaActive()) {
-                stopBleOta();
-                serial_printf("BLE OTA: OFF\n");
+                esp_err_t err = stopBleOta();
+                serial_printf("BLE OTA: %s\n", err == ESP_OK ? "OFF" : esp_err_to_name(err));
             } else {
-                startBleOta();
-                serial_printf("BLE OTA: ON (LAPTIMER-OTA)\n");
+                esp_err_t err = startBleOta();
+                if (err == ESP_OK) {
+                    serial_printf("BLE OTA: ON (LAPTIMER-OTA)\n");
+                } else {
+                    serial_printf("BLE OTA start failed: %s\n", esp_err_to_name(err));
+                }
             }
             break;
 

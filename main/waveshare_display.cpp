@@ -13,6 +13,8 @@
 #include "protocol.hpp"
 #include "sector_timing.h"
 #include "ublox_gps.h"
+#include "ble_ota.h"
+#include "wifi_portal.h"
 
 #include <cstring>
 #include <cstdio>
@@ -33,6 +35,7 @@
 #include "lvgl.h"
 #include "esp_io_expander_tca9554.h"
 #include "esp_heap_caps.h"
+#include "esp_wifi.h"
 
 // Share Tech Mono font declarations
 LV_FONT_DECLARE(share_tech_mono_24);
@@ -168,6 +171,7 @@ enum class StartupState {
     INIT,
     MODE_SELECT,
     PHONE_PLATE,    // phone_overlay 활성
+    BLE_OTA,        // BLE OTA 모드 (WiFi 해제, BLE 광고)
     WAIT_GPS,
     WAIT_SIM,
     TRANSITION,
@@ -1508,10 +1512,14 @@ void updateStartupScreen(void)
                 lv_obj_set_style_text_color(startup_status_label,
                     lv_color_make(0x00, 0xCC, 0xCC), 0);
                 lv_label_set_text(startup_status_label, "< EMULATION >");
-            } else {
+            } else if (s_startupModeIndex == 2) {
                 lv_obj_set_style_text_color(startup_status_label,
                     lv_color_make(0xFF, 0xCC, 0x00), 0);
                 lv_label_set_text(startup_status_label, "< GPS STATUS >");
+            } else if (s_startupModeIndex == 3) {
+                lv_obj_set_style_text_color(startup_status_label,
+                    lv_color_make(0x00, 0x88, 0xFF), 0);
+                lv_label_set_text(startup_status_label, "< BLE OTA >");
             }
             // 힌트 표시
             lv_label_set_text(startup_hint_label, "swipe: change  /  tap: start");
@@ -1526,14 +1534,19 @@ void updateStartupScreen(void)
         GestureResult gesture = detectGesture();
 
         if (gesture == GESTURE_SWIPE_LEFT || gesture == GESTURE_SWIPE_RIGHT) {
-            // 좌우 스와이프 → 3개 모드 순환 (SIMULATION ↔ GPS ↔ GPS STATUS)
+            // 좌우 스와이프 → 4개 모드 순환 (LAPTIMER ↔ EMULATION ↔ GPS STATUS ↔ BLE OTA)
             if (gesture == GESTURE_SWIPE_LEFT) {
-                s_startupModeIndex = (s_startupModeIndex + 1) % 3;
+                s_startupModeIndex = (s_startupModeIndex + 1) % 4;
             } else {
-                s_startupModeIndex = (s_startupModeIndex + 2) % 3;
+                s_startupModeIndex = (s_startupModeIndex + 3) % 4;
             }
-            // 0=LAPTIMER(GPS), 1=EMULATION(SIM), 2=GPS STATUS(GPS)
-            s_selectedMode = (s_startupModeIndex == 1) ? GPSMode::SIMULATION : GPSMode::GPS_HARDWARE;
+            // 0=LAPTIMER(GPS), 1=EMULATION(SIM), 2=GPS STATUS(GPS), 3=BLE OTA(n/a)
+            if (s_startupModeIndex == 1) {
+                s_selectedMode = GPSMode::SIMULATION;
+            } else if (s_startupModeIndex != 3) {
+                s_selectedMode = GPSMode::GPS_HARDWARE;
+            }
+            // BLE OTA mode doesn't set s_selectedMode
 
             if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 if (s_startupModeIndex == 0) {
@@ -1544,10 +1557,14 @@ void updateStartupScreen(void)
                     lv_obj_set_style_text_color(startup_status_label,
                         lv_color_make(0x00, 0xCC, 0xCC), 0);
                     lv_label_set_text(startup_status_label, "< EMULATION >");
-                } else {
+                } else if (s_startupModeIndex == 2) {
                     lv_obj_set_style_text_color(startup_status_label,
                         lv_color_make(0xFF, 0xCC, 0x00), 0);
                     lv_label_set_text(startup_status_label, "< GPS STATUS >");
+                } else if (s_startupModeIndex == 3) {
+                    lv_obj_set_style_text_color(startup_status_label,
+                        lv_color_make(0x00, 0x88, 0xFF), 0);
+                    lv_label_set_text(startup_status_label, "< BLE OTA >");
                 }
                 xSemaphoreGive(lvgl_mutex);
             }
@@ -1564,10 +1581,12 @@ void updateStartupScreen(void)
             s_startupState = StartupState::PHONE_PLATE;
         } else if (gesture == GESTURE_TAP) {
             // 탭 → 모드 확정, 시작
-            // 0=LAPTIMER, 1=EMULATION, 2=GPS STATUS
-            const char* modeNames[] = {"LAPTIMER", "EMULATION", "GPS STATUS"};
-            gApp.currentGpsMode = s_selectedMode;
+            // 0=LAPTIMER, 1=EMULATION, 2=GPS STATUS, 3=BLE OTA
+            const char* modeNames[] = {"LAPTIMER", "EMULATION", "GPS STATUS", "BLE OTA"};
             ESP_LOGI(TAG, "Mode selected: %s", modeNames[s_startupModeIndex]);
+            if (s_startupModeIndex != 3) {
+                gApp.currentGpsMode = s_selectedMode;
+            }
 
             // 하나의 mutex 구간으로 통합 (힌트 숨김 + 모드별 텍스트)
             if (lvgl_lock(10)) {
@@ -1575,6 +1594,8 @@ void updateStartupScreen(void)
                 lv_label_set_text(startup_version_label, APP_VERSION);
                 if (s_startupModeIndex == 1) {
                     lv_label_set_text(startup_status_label, "EMULATION");
+                } else if (s_startupModeIndex == 3) {
+                    lv_label_set_text(startup_status_label, "BLE OTA");
                 }
                 lvgl_unlock();
             }
@@ -1588,13 +1609,16 @@ void updateStartupScreen(void)
             } else if (s_startupModeIndex == 1) {
                 // EMULATION (시뮬레이션)
                 s_startupState = StartupState::WAIT_SIM;
-            } else {
+            } else if (s_startupModeIndex == 2) {
                 // GPS STATUS → 진단 전용 모드 (랩타이머 비활성)
                 s_gpsStatusOnlyMode = true;
                 enableGPSModule();
                 s_currentPage = PAGE_GPS_STATUS;
                 s_startupTransitionStartMs = now;
                 s_startupState = StartupState::TRANSITION;
+            } else if (s_startupModeIndex == 3) {
+                // BLE OTA 모드
+                s_startupState = StartupState::BLE_OTA;
             }
         }
         break;
@@ -1610,6 +1634,91 @@ void updateStartupScreen(void)
                 xSemaphoreGive(lvgl_mutex);
             }
             s_startupState = StartupState::MODE_SELECT;
+        }
+        break;
+    }
+
+    case StartupState::BLE_OTA: {
+        // 최초 진입 시 1회 초기화
+        static bool s_bleOtaStarted = false;
+        static bool s_bleOtaFailed = false;
+        if (!s_bleOtaStarted && !s_bleOtaFailed) {
+            // WiFi 완전 해제 (메모리 확보)
+            if (isWifiPortalActive()) {
+                stopWifiPortal();
+            }
+            esp_wifi_deinit();
+            ESP_LOGI(TAG, "WiFi deinitialized for BLE OTA");
+
+            esp_err_t err = startBleOta();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "BLE OTA start failed: %s", esp_err_to_name(err));
+                s_bleOtaFailed = true;
+                if (lvgl_lock(10)) {
+                    lv_label_set_text(startup_status_label, "BLE OTA");
+                    lv_obj_set_style_text_color(startup_status_label,
+                        lv_color_make(0xFF, 0x00, 0x00), 0);
+                    lv_label_set_text(startup_hint_label, "init failed!  swipe: back");
+                    lv_obj_clear_flag(startup_hint_label, LV_OBJ_FLAG_HIDDEN);
+                    lvgl_unlock();
+                }
+            } else {
+                s_bleOtaStarted = true;
+                if (lvgl_lock(10)) {
+                    lv_label_set_text(startup_status_label, "BLE OTA");
+                    lv_obj_set_style_text_color(startup_status_label,
+                        lv_color_make(0x00, 0x88, 0xFF), 0);
+                    lv_label_set_text(startup_hint_label, "starting...  swipe: back");
+                    lv_obj_clear_flag(startup_hint_label, LV_OBJ_FLAG_HIDDEN);
+                    lvgl_unlock();
+                }
+            }
+        }
+
+        // BLE 상태 업데이트
+        if (s_bleOtaStarted) {
+            if (gApp.otaState == OTAState::RECEIVING) {
+                char buf[48];
+                snprintf(buf, sizeof(buf), "updating... %d%%", (int)(gApp.otaProgress * 100));
+                if (lvgl_lock(10)) {
+                    lv_label_set_text(startup_hint_label, buf);
+                    lvgl_unlock();
+                }
+            } else if (gApp.otaState == OTAState::COMPLETE) {
+                if (lvgl_lock(10)) {
+                    lv_label_set_text(startup_hint_label, "update complete! rebooting...");
+                    lvgl_unlock();
+                }
+            } else if (gApp.otaState == OTAState::ERROR) {
+                if (lvgl_lock(10)) {
+                    lv_label_set_text(startup_hint_label, "update failed!  swipe: back");
+                    lvgl_unlock();
+                }
+            } else if (isBleOtaAdvertising()) {
+                // 실제 광고 중일 때만 표시 (P1-5)
+                if (lvgl_lock(10)) {
+                    lv_label_set_text(startup_hint_label, "advertising...  swipe: back");
+                    lvgl_unlock();
+                }
+            }
+        }
+
+        // 스와이프로 복귀 (OTA 진행/검증/완료 중이 아닐 때만 — P0-3)
+        GestureResult gesture = detectGesture();
+        bool exitBlocked = (gApp.otaState == OTAState::RECEIVING
+                         || gApp.otaState == OTAState::VALIDATING
+                         || gApp.otaState == OTAState::COMPLETE);
+        if (gesture != GESTURE_NONE && !exitBlocked) {
+            if (s_bleOtaStarted) {
+                stopBleOta();
+            }
+            s_bleOtaStarted = false;
+            s_bleOtaFailed = false;
+            if (lvgl_lock(10)) {
+                lv_obj_clear_flag(startup_overlay, LV_OBJ_FLAG_HIDDEN);
+                lvgl_unlock();
+            }
+            s_startupState = StartupState::INIT;  // re-init to redraw mode select
         }
         break;
     }

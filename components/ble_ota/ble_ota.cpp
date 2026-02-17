@@ -1,24 +1,28 @@
-/**
+﻿/**
  * @file ble_ota.cpp
  * @brief BLE OTA firmware update service using NimBLE
  *
  * GATT Service (UUID: 0xFFE0):
- *   - Control (0xFFE1): Write — START/END/ABORT/VERSION commands
- *   - Data    (0xFFE2): Write No Response — firmware chunks (max 512B)
- *   - Status  (0xFFE3): Read + Notify — state/progress/version
+ *   - Control (0xFFE1): Write ??START/END/ABORT/VERSION commands
+ *   - Data    (0xFFE2): Write No Response ??firmware chunks (max 512B)
+ *   - Status  (0xFFE3): Read + Notify ??state/progress/version
  *
- * On-demand: startBleOta() → NimBLE init + advertise,
- * stopBleOta() → shutdown. WiFi is stopped during BLE OTA.
+ * On-demand: startBleOta() ??NimBLE init + advertise,
+ * stopBleOta() ??shutdown. WiFi ?댁젣???몄텧??梨낆엫.
  */
 
 #include "ble_ota.h"
 #include "types.h"
 #include "ota_manager.h"
-#include "wifi_portal.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_bt.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/idf_additions.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -36,15 +40,27 @@ static const char *TAG = "BLE_OTA";
 // ============================================================
 
 static bool s_active = false;
+static bool s_starting = false;
+static bool s_advertising = false;
+static volatile bool s_hostTaskRunning = false;
+static TaskHandle_t s_hostTaskHandle = nullptr;
+static volatile bool s_synced = false;
 static uint16_t s_connHandle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_statusValHandle = 0;
 static uint8_t s_addrType;
 static int s_lastNotifyPct = -1;
 
+static constexpr TickType_t HOST_TASK_STOP_TIMEOUT_TICKS  = pdMS_TO_TICKS(1000);
+static constexpr TickType_t HS_SYNC_TIMEOUT_TICKS         = pdMS_TO_TICKS(4000);
+
 // Forward declarations
 static void startAdvertising(void);
 static void sendStatusNotify(void);
 static int bleGapEvent(struct ble_gap_event *event, void *arg);
+static bool waitForTrue(volatile bool &flag, TickType_t timeoutTicks);
+static bool waitForFalse(volatile bool &flag, TickType_t timeoutTicks);
+static esp_err_t startNimbleHostTask(void);
+static void forceBtControllerIdle(void);
 
 // ============================================================
 // Delayed restart after OTA
@@ -91,7 +107,6 @@ static void buildStatusPayload(uint8_t *payload)
 // GATT access callbacks
 // ============================================================
 
-// OTA Control (0xFFE1) — Write
 static int onControlAccess(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -104,7 +119,7 @@ static int onControlAccess(uint16_t conn_handle, uint16_t attr_handle,
     os_mbuf_copydata(ctxt->om, 0, 1, &cmd);
 
     switch (cmd) {
-    case 0x01: { // START — [cmd(1) + size(4)]
+    case 0x01: { // START
         if (len < 5) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         uint32_t imageSize;
         os_mbuf_copydata(ctxt->om, 1, 4, &imageSize);
@@ -140,7 +155,6 @@ static int onControlAccess(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
-// OTA Data (0xFFE2) — Write Without Response
 static int onDataAccess(uint16_t conn_handle, uint16_t attr_handle,
                         struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -156,7 +170,6 @@ static int onDataAccess(uint16_t conn_handle, uint16_t attr_handle,
         return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     }
 
-    // Notify progress every 5%
     int pct = (int)(gApp.otaProgress * 100);
     if (pct / 5 != s_lastNotifyPct / 5) {
         s_lastNotifyPct = pct;
@@ -166,7 +179,6 @@ static int onDataAccess(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
-// OTA Status (0xFFE3) — Read
 static int onStatusAccess(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -258,13 +270,11 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             s_connHandle = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected, handle=%d", s_connHandle);
-            // MTU 교환은 클라이언트(Web Bluetooth)가 시작
-            // 빠른 연결 인터벌 요청 (7.5ms)
             struct ble_gap_upd_params upd = {};
-            upd.itvl_min = 6;              // 7.5ms (1.25ms 단위)
+            upd.itvl_min = 6;
             upd.itvl_max = 6;
             upd.latency = 0;
-            upd.supervision_timeout = 500;  // 5s (10ms 단위)
+            upd.supervision_timeout = 500;
             ble_gap_update_params(s_connHandle, &upd);
         } else {
             startAdvertising();
@@ -301,23 +311,36 @@ static void startAdvertising(void)
 {
     struct ble_hs_adv_fields fields = {};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.tx_pwr_lvl_is_present = 1;
-    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+
+    static ble_uuid16_t advSvcUuids[] = { BLE_UUID16_INIT(0xFFE0) };
+    fields.uuids16 = advSvcUuids;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+
     const char *name = ble_svc_gap_device_name();
     fields.name = (uint8_t *)name;
     fields.name_len = strlen(name);
     fields.name_is_complete = 1;
 
-    ble_gap_adv_set_fields(&fields);
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_set_fields failed: %d", rc);
+        s_advertising = false;
+        return;
+    }
 
     struct ble_gap_adv_params params = {};
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    int rc = ble_gap_adv_start(s_addrType, NULL, BLE_HS_FOREVER,
-                                &params, bleGapEvent, NULL);
+    rc = ble_gap_adv_start(s_addrType, NULL, BLE_HS_FOREVER,
+                            &params, bleGapEvent, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Advertising start failed: %d", rc);
+        ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
+        s_advertising = false;
+    } else {
+        s_advertising = true;
+        ESP_LOGI(TAG, "Advertising OK as '%s'", name);
     }
 }
 
@@ -327,89 +350,373 @@ static void startAdvertising(void)
 
 static void onSync(void)
 {
-    ble_hs_id_infer_auto(0, &s_addrType);
-    ESP_LOGI(TAG, "NimBLE synced, advertising...");
+    int rc = ble_hs_id_infer_auto(0, &s_addrType);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
+        return;
+    }
+    s_synced = true;
+    ESP_LOGI(TAG, "NimBLE synced (addrType=%d)", s_addrType);
     startAdvertising();
 }
 
 static void onReset(int reason)
 {
-    ESP_LOGW(TAG, "NimBLE reset, reason=%d", reason);
+    ESP_LOGW(TAG, "NimBLE host reset, reason=%d", reason);
+    s_synced = false;
+    s_advertising = false;
 }
 
 static void bleHostTask(void *param)
 {
+    s_hostTaskHandle = xTaskGetCurrentTaskHandle();
+    s_hostTaskRunning = true;
+    ESP_LOGI(TAG, "Host task started (free stack: %u)",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
     nimble_port_run();
-    nimble_port_freertos_deinit();
+    ESP_LOGI(TAG, "Host task exiting");
+    s_hostTaskRunning = false;
+    s_hostTaskHandle = nullptr;
+    vTaskDelete(NULL);
+}
+
+static bool waitForTrue(volatile bool &flag, TickType_t timeoutTicks)
+{
+    TickType_t start = xTaskGetTickCount();
+    while (!flag) {
+        if ((xTaskGetTickCount() - start) >= timeoutTicks) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return true;
+}
+
+static bool waitForFalse(volatile bool &flag, TickType_t timeoutTicks)
+{
+    TickType_t start = xTaskGetTickCount();
+    while (flag) {
+        if ((xTaskGetTickCount() - start) >= timeoutTicks) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return true;
+}
+
+static esp_err_t startNimbleHostTask(void)
+{
+    // Try the configured stack first, then smaller fallbacks.
+    const uint32_t stackCandidates[] = {
+        (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE,
+        6144,
+        4096,
+    };
+    const BaseType_t preferredCore = CONFIG_BT_NIMBLE_PINNED_TO_CORE;
+    esp_err_t err = ESP_FAIL;
+
+    auto tryCreate = [&](BaseType_t core, UBaseType_t caps, const char *capsName) -> esp_err_t {
+        for (uint32_t stackBytes : stackCandidates) {
+            if (stackBytes == 0) {
+                continue;
+            }
+
+            // Skip duplicate attempts when config equals fallback.
+            if (stackBytes != (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE) {
+                if (stackBytes == 6144 && (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE == 6144) {
+                    continue;
+                }
+                if (stackBytes == 4096 && (uint32_t)CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE == 4096) {
+                    continue;
+                }
+            }
+
+            BaseType_t rc = xTaskCreatePinnedToCoreWithCaps(
+                bleHostTask,
+                "nimble_host",
+                stackBytes,
+                NULL,
+                (configMAX_PRIORITIES - 4),
+                &s_hostTaskHandle,
+                core,
+                caps);
+
+            if (rc == pdPASS) {
+                ESP_LOGI(TAG, "nimble_host created (stack=%lu, core=%ld, mem=%s)",
+                         (unsigned long)stackBytes, (long)core, capsName);
+                return ESP_OK;
+            }
+
+            s_hostTaskHandle = nullptr;
+            ESP_LOGW(TAG, "nimble_host create failed (stack=%lu, core=%ld, mem=%s, rc=%ld)",
+                     (unsigned long)stackBytes, (long)core, capsName, (long)rc);
+        }
+        return ESP_ERR_NO_MEM;
+    };
+
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    const UBaseType_t spiramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    ESP_LOGI(TAG, "Trying nimble_host create with SPIRAM stack first");
+
+    err = tryCreate(preferredCore, spiramCaps, "spiram");
+    if (err == ESP_OK) {
+        return ESP_OK;
+    }
+
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+    const BaseType_t altCoreSpiram = (preferredCore == 0) ? 1 : 0;
+    ESP_LOGW(TAG, "Retrying nimble_host create on alternate core=%ld (spiram)", (long)altCoreSpiram);
+    err = tryCreate(altCoreSpiram, spiramCaps, "spiram");
+    if (err == ESP_OK) {
+        return ESP_OK;
+    }
+#endif
+#endif
+
+    const UBaseType_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGW(TAG, "Falling back to internal RAM stack for nimble_host");
+
+    err = tryCreate(preferredCore, internalCaps, "internal");
+    if (err == ESP_OK) {
+        return ESP_OK;
+    }
+
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+    const BaseType_t altCore = (preferredCore == 0) ? 1 : 0;
+    ESP_LOGW(TAG, "Retrying nimble_host create on alternate core=%ld (internal)", (long)altCore);
+    err = tryCreate(altCore, internalCaps, "internal");
+    if (err == ESP_OK) {
+        return ESP_OK;
+    }
+#endif
+
+    ESP_LOGE(TAG, "Failed to create nimble_host task (configured stack=%d, core=%d, int_largest=%lu, spiram_largest=%lu)",
+             CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE,
+             CONFIG_BT_NIMBLE_PINNED_TO_CORE,
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    return ESP_ERR_NO_MEM;
+}
+
+static void forceBtControllerIdle(void)
+{
+    esp_bt_controller_status_t status = esp_bt_controller_get_status();
+    if (status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+        esp_err_t e = esp_bt_controller_disable();
+        ESP_LOGI(TAG, "BT controller disable(forced): %s", esp_err_to_name(e));
+    }
+
+    status = esp_bt_controller_get_status();
+    if (status == ESP_BT_CONTROLLER_STATUS_INITED) {
+        esp_err_t e = esp_bt_controller_deinit();
+        ESP_LOGI(TAG, "BT controller deinit(forced): %s", esp_err_to_name(e));
+    }
 }
 
 // ============================================================
 // Public API
 // ============================================================
 
-void startBleOta(void)
+esp_err_t startBleOta(void)
 {
+    if (s_starting) {
+        ESP_LOGW(TAG, "Start already in progress");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (s_active) {
-        ESP_LOGW(TAG, "BLE OTA already active");
-        return;
+        esp_bt_controller_status_t status = esp_bt_controller_get_status();
+        if (!s_hostTaskRunning && status == ESP_BT_CONTROLLER_STATUS_IDLE) {
+            ESP_LOGW(TAG, "Clearing stale active state");
+            s_active = false;
+            s_advertising = false;
+            s_synced = false;
+            s_hostTaskHandle = nullptr;
+        } else {
+        ESP_LOGW(TAG, "Already active");
+        return ESP_ERR_INVALID_STATE;
+        }
     }
 
-    // WiFi/BLE 라디오 배타성 — WiFi 중지
-    if (isWifiPortalActive()) {
-        stopWifiPortal();
-        ESP_LOGI(TAG, "WiFi stopped for BLE OTA");
+    s_starting = true;
+    s_hostTaskRunning = false;
+    s_hostTaskHandle = nullptr;
+    s_synced = false;
+    s_advertising = false;
+    s_connHandle = BLE_HS_CONN_HANDLE_NONE;
+
+    ESP_LOGI(TAG, "=== BLE OTA init ===");
+    ESP_LOGI(TAG, "Heap: free=%lu largest=%lu int_free=%lu int_largest=%lu",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE) {
+        ESP_LOGW(TAG, "BT controller not idle before init; forcing cleanup");
+        forceBtControllerIdle();
     }
 
-    // NimBLE 초기화
+    // 1. NimBLE ?ы듃 珥덇린??(BT 而⑦듃濡ㅻ윭 + HCI + host)
     esp_err_t ret = nimble_port_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "nimble_port_init failed: %s", esp_err_to_name(ret));
-        return;
+        ESP_LOGE(TAG, "nimble_port_init FAILED: %s", esp_err_to_name(ret));
+        s_starting = false;
+        return ret;
     }
+    ESP_LOGI(TAG, "[1] nimble_port_init OK (heap: %lu)",
+             (unsigned long)esp_get_free_heap_size());
 
-    // 높은 MTU 요청 (512B 데이터 전송용)
-    ble_att_set_preferred_mtu(517);
-
-    // GAP/GATT 서비스 초기화
-    ble_svc_gap_device_name_set("LAPTIMER-OTA");
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-
-    // OTA GATT 서비스 등록
-    ble_gatts_count_cfg(s_gattSvcs);
-    ble_gatts_add_svcs(s_gattSvcs);
-
-    // Host 콜백
+    // 2. Host 肄쒕갚 ?ㅼ젙 (?쒕퉬??init ????ESP-IDF bleprph ?⑦꽩)
     ble_hs_cfg.sync_cb = onSync;
     ble_hs_cfg.reset_cb = onReset;
 
-    // NimBLE host task 시작
-    nimble_port_freertos_init(bleHostTask);
+    // 3. MTU
+    ble_att_set_preferred_mtu(517);
+
+    // 4. GAP/GATT services
+    int rc = ble_svc_gap_device_name_set("LAPTIMER-OTA");
+    if (rc != 0) {
+        ESP_LOGE(TAG, "device_name_set failed: %d", rc);
+        (void)nimble_port_deinit();
+        forceBtControllerIdle();
+        s_starting = false;
+        return ESP_FAIL;
+    }
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    // 5. OTA GATT ?쒕퉬???깅줉
+    rc = ble_gatts_count_cfg(s_gattSvcs);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "gatts_count_cfg failed: %d", rc);
+        (void)nimble_port_deinit();
+        forceBtControllerIdle();
+        s_starting = false;
+        return ESP_FAIL;
+    }
+    rc = ble_gatts_add_svcs(s_gattSvcs);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "gatts_add_svcs failed: %d", rc);
+        (void)nimble_port_deinit();
+        forceBtControllerIdle();
+        s_starting = false;
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "[2] GATT services OK");
+
+    // 6. NimBLE host task ?쒖옉
+    ESP_LOGI(TAG, "[3] Starting host task (heap: %lu)...",
+             (unsigned long)esp_get_free_heap_size());
+    ret = startNimbleHostTask();
+    if (ret != ESP_OK) {
+        (void)nimble_port_deinit();
+        forceBtControllerIdle();
+        s_starting = false;
+        return ret;
+    }
 
     s_active = true;
-    s_connHandle = BLE_HS_CONN_HANDLE_NONE;
-    ESP_LOGI(TAG, "BLE OTA started, advertising as LAPTIMER-OTA");
+
+    if (!waitForTrue(s_synced, HS_SYNC_TIMEOUT_TICKS)) {
+        if (!s_hostTaskRunning) {
+            ESP_LOGE(TAG, "Host sync timeout (host task not running)");
+        } else {
+            ESP_LOGE(TAG, "Host sync timeout (onSync not called)");
+        }
+        (void)stopBleOta();
+        s_starting = false;
+        return ESP_ERR_TIMEOUT;
+    }
+    if (!s_advertising) {
+        ESP_LOGE(TAG, "Sync OK but advertising start failed");
+        (void)stopBleOta();
+        s_starting = false;
+        return ESP_FAIL;
+    }
+
+    s_starting = false;
+    ESP_LOGI(TAG, "=== BLE OTA init done (advertising) ===");
+    return ESP_OK;
 }
 
-void stopBleOta(void)
+esp_err_t stopBleOta(void)
 {
-    if (!s_active) return;
+    if (!s_active && !s_starting) return ESP_OK;
+
+    ESP_LOGI(TAG, "=== BLE OTA shutdown ===");
 
     if (ota::isInProgress()) {
         ota::abort();
     }
 
+    // 1. 愿묎퀬/?곌껐 以묒?
+    ble_gap_adv_stop();
+    if (s_connHandle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_connHandle, BLE_ERR_REM_USER_CONN_TERM);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // 2. NimBLE host 以묒? ??nimble_port_run() 由ы꽩
     int rc = nimble_port_stop();
-    if (rc == 0) {
-        nimble_port_deinit();
+    ESP_LOGI(TAG, "nimble_port_stop: %d", rc);
+    if (rc == BLE_HS_EALREADY) {
+        ESP_LOGW(TAG, "nimble_port_stop: host already stopped");
+        rc = 0;
+    } else if (rc != 0) {
+        ESP_LOGE(TAG, "nimble_port_stop unexpected rc=%d (continuing cleanup)", rc);
+    }
+
+    // 3. Wait until host task exits and deinit callback runs
+    if (s_hostTaskRunning) {
+        if (!waitForFalse(s_hostTaskRunning, HOST_TASK_STOP_TIMEOUT_TICKS)) {
+            ESP_LOGW(TAG, "Host task stop timeout");
+            if (s_hostTaskHandle != nullptr) {
+                ESP_LOGW(TAG, "Force deleting stuck nimble_host task");
+                vTaskDelete(s_hostTaskHandle);
+                s_hostTaskHandle = nullptr;
+                s_hostTaskRunning = false;
+            }
+        }
+    }
+
+    // 4. NimBLE ?ㅽ깮 ?댁젣
+    esp_err_t ret = nimble_port_deinit();
+    ESP_LOGI(TAG, "nimble_port_deinit: %s", esp_err_to_name(ret));
+    if (ret == ESP_ERR_INVALID_STATE) {
+        // Host already down; continue with explicit controller cleanup.
+        ret = ESP_OK;
+    }
+
+    // 5. BT 而⑦듃濡ㅻ윭 ?곹깭 ?뺤씤 + 紐낆떆???뺣━
+    forceBtControllerIdle();
+
+    esp_bt_controller_status_t status = esp_bt_controller_get_status();
+    if (status != ESP_BT_CONTROLLER_STATUS_IDLE) {
+        ESP_LOGE(TAG, "BT controller NOT idle (status=%d)!", status);
     }
 
     s_active = false;
+    s_starting = false;
+    s_advertising = false;
+    s_synced = false;
+    s_hostTaskHandle = nullptr;
     s_connHandle = BLE_HS_CONN_HANDLE_NONE;
-    ESP_LOGI(TAG, "BLE OTA stopped");
+    ESP_LOGI(TAG, "=== BLE OTA shutdown OK (heap: %lu) ===",
+             (unsigned long)esp_get_free_heap_size());
+
+    if (status != ESP_BT_CONTROLLER_STATUS_IDLE || ret != ESP_OK) {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 bool isBleOtaActive(void)
 {
     return s_active;
+}
+
+bool isBleOtaAdvertising(void)
+{
+    return s_active && s_advertising;
 }

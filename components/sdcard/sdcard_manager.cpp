@@ -1,10 +1,10 @@
-/**
+﻿/**
  * @file sdcard_manager.cpp
  * @brief SD card manager (SDMMC 1-bit, FAT32)
  *
  * Pins: GPIO39(CMD), GPIO40(D0), GPIO41(CLK)
  * Mount point: /sdcard
- * No auto-format — use sdcardFormat() or serial 'm' command for manual format.
+ * No auto-format ??use sdcardFormat() or serial 'm' command for manual format.
  */
 
 #include "sdcard_manager.h"
@@ -12,17 +12,28 @@
 #include <cstring>
 #include <sys/stat.h>
 
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/gpio.h"
+#include "soc/soc_caps.h"
 
 static const char* TAG = "SDCARD";
 
+#if !CONFIG_IDF_TARGET_ESP32S3
+#error "gps-laptimer requires ESP32-S3 target. Run: idf.py fullclean && idf.py set-target esp32s3"
+#endif
+
+
 // ============================================================
-// Pin 정의 (hardware.md Section 8)
+// Pin ?�의 (hardware.md Section 8)
 // ============================================================
+
+#if SOC_GPIO_PIN_COUNT <= 41
+#error "Target does not expose required GPIO39/GPIO40/GPIO41 for SDMMC."
+#endif
 
 static constexpr gpio_num_t SDMMC_PIN_CMD = GPIO_NUM_39;
 static constexpr gpio_num_t SDMMC_PIN_CLK = GPIO_NUM_41;
@@ -61,7 +72,7 @@ bool sdcardInit(void)
     }
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
-    mount_config.format_if_mount_failed = false;  // 자동 포맷 안 함 — 부팅 지연 방지
+    mount_config.format_if_mount_failed = false;  // ?�동 ?�맷 ??????부??지??방�?
     mount_config.max_files = 5;
     mount_config.allocation_unit_size = 16 * 1024;
 
@@ -78,7 +89,7 @@ bool sdcardInit(void)
                                              &mount_config, &s_card);
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
-            ESP_LOGW(TAG, "Mount failed (filesystem error — use 'm' command to format)");
+            ESP_LOGW(TAG, "Mount failed (filesystem error ??use 'm' command to format)");
         } else {
             ESP_LOGW(TAG, "Mount failed: %s", esp_err_to_name(ret));
         }
@@ -89,11 +100,11 @@ bool sdcardInit(void)
 
     s_mounted = true;
 
-    // 카드 정보 로그
+    // 카드 ?�보 로그
     ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
     sdmmc_card_print_info(stdout, s_card);
 
-    // laps 디렉토리 생성
+    // laps ?�렉?�리 ?�성
     ensureDir("/sdcard/laps");
 
     return true;
@@ -113,12 +124,12 @@ bool sdcardFormat(void)
 {
     ESP_LOGI(TAG, "Formatting SD card...");
 
-    // 언마운트 후 재마운트 (format_if_mount_failed로 포맷 유도)
+    // ?�마?�트 ???�마?�트 (format_if_mount_failed�??�맷 ?�도)
     if (s_mounted) {
         sdcardDeinit();
     }
 
-    // 마운트 시도 — 실패하면 포맷
+    // 마운???�도 ???�패?�면 ?�맷
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
     mount_config.format_if_mount_failed = true;
     mount_config.max_files = 5;
@@ -133,11 +144,11 @@ bool sdcardFormat(void)
     slot_config.cmd = SDMMC_PIN_CMD;
     slot_config.d0  = SDMMC_PIN_D0;
 
-    // 직접 포맷을 위해 먼저 raw mount
+    // 직접 ?�맷???�해 먼�? raw mount
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config,
                                              &mount_config, &s_card);
     if (ret == ESP_OK && s_card) {
-        // 이미 마운트됨 → 포맷 실행
+        // ?��? 마운?�됨 ???�맷 ?�행
         ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, s_card);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
