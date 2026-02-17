@@ -57,6 +57,8 @@ static TimerHandle_t s_logFlushTimer = nullptr;
 
 static constexpr const char *SETTINGS_PATH = "/spiffs/config/settings.json";
 static constexpr int WS_MAX_CLIENTS = 4;
+// Keep disabled by default to preserve internal RAM for SoftAP auth/DHCP.
+static constexpr bool ENABLE_LIVE_LOG_WS = false;
 
 // WiFi ON/OFF 상태
 static bool s_wifiActive = false;
@@ -416,7 +418,7 @@ static esp_err_t handleCaptiveCheck(httpd_req_t *req)
 static void initHttpServer(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = ENABLE_LIVE_LOG_WS ? 12 : 11;
     config.max_open_sockets = 3;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 4096;
@@ -481,16 +483,18 @@ static void initHttpServer(void)
     httpd_register_uri_handler(s_httpServer, &uri_post_settings);
 
     // WebSocket: 로그 스트리밍
-    httpd_uri_t uri_ws_log = {
-        .uri = "/ws/log",
-        .method = HTTP_GET,
-        .handler = handleWsLog,
-        .user_ctx = nullptr,
-        .is_websocket = true,
-        .handle_ws_control_frames = false,
-        .supported_subprotocol = nullptr
-    };
-    httpd_register_uri_handler(s_httpServer, &uri_ws_log);
+    if (ENABLE_LIVE_LOG_WS) {
+        httpd_uri_t uri_ws_log = {
+            .uri = "/ws/log",
+            .method = HTTP_GET,
+            .handler = handleWsLog,
+            .user_ctx = nullptr,
+            .is_websocket = true,
+            .handle_ws_control_frames = false,
+            .supported_subprotocol = nullptr
+        };
+        httpd_register_uri_handler(s_httpServer, &uri_ws_log);
+    }
 
     // Favicon
     httpd_uri_t uri_favicon = {
@@ -637,13 +641,15 @@ static void startSoftAP(void)
     strcpy((char *)wifi_config.ap.ssid, "LAPTIMER");
     wifi_config.ap.ssid_len = strlen("LAPTIMER");
     wifi_config.ap.channel = 1;
-    wifi_config.ap.max_connection = 4;
+    // Single-user OTA portal: allow only one station to minimize AP footprint.
+    wifi_config.ap.max_connection = 1;
     wifi_config.ap.authmode = WIFI_AUTH_OPEN;
 
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    vTaskDelay(pdMS_TO_TICKS(25));
 
     // DHCP 서버 명시적 재시작 (부팅 시 auto-start 후 응답 안 하는 문제 대응)
     if (s_apNetif) {
