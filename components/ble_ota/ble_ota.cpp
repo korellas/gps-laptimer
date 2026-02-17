@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
 
@@ -51,15 +52,37 @@ static uint16_t s_connHandle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_statusValHandle = 0;
 static uint8_t s_addrType;
 static int s_lastNotifyPct = -1;
+static QueueHandle_t s_otaCmdQueue = nullptr;
+static TaskHandle_t s_otaWorkerHandle = nullptr;
+static volatile bool s_otaWorkerRunning = false;
 
 static constexpr TickType_t HOST_TASK_STOP_TIMEOUT_TICKS  = pdMS_TO_TICKS(1000);
 static constexpr TickType_t HS_SYNC_TIMEOUT_TICKS         = pdMS_TO_TICKS(4000);
+static constexpr TickType_t OTA_WORKER_STOP_TIMEOUT_TICKS = pdMS_TO_TICKS(1000);
+static constexpr uint32_t OTA_CMD_QUEUE_LEN = 8;
 // Keep NimBLE host stack in internal RAM, but cap to 4KB to avoid starving BT init.
 static constexpr uint32_t NIMBLE_HOST_STACK_BYTES = 4096;
 static constexpr uint32_t NIMBLE_HOST_STACK_WORDS =
     (NIMBLE_HOST_STACK_BYTES + sizeof(StackType_t) - 1U) / sizeof(StackType_t);
 DRAM_ATTR static StackType_t s_hostTaskStack[NIMBLE_HOST_STACK_WORDS];
 DRAM_ATTR static StaticTask_t s_hostTaskTcb;
+static constexpr uint32_t OTA_WORKER_STACK_BYTES = 6144;
+static constexpr uint32_t OTA_WORKER_STACK_WORDS =
+    (OTA_WORKER_STACK_BYTES + sizeof(StackType_t) - 1U) / sizeof(StackType_t);
+DRAM_ATTR static StackType_t s_otaWorkerStack[OTA_WORKER_STACK_WORDS];
+DRAM_ATTR static StaticTask_t s_otaWorkerTcb;
+
+enum class OtaCmdType : uint8_t {
+    START = 1,
+    END = 2,
+    ABORT = 3,
+    EXIT = 0xFF,
+};
+
+struct OtaCommand {
+    OtaCmdType type;
+    uint32_t imageSize;
+};
 
 // Forward declarations
 static void startAdvertising(void);
@@ -70,6 +93,9 @@ static bool waitForFalse(volatile bool &flag, TickType_t timeoutTicks);
 static esp_err_t startNimbleHostTask(void);
 static void freeNimbleHostTaskBuffers(void);
 static void forceBtControllerIdle(void);
+static esp_err_t startOtaWorkerTask(void);
+static void stopOtaWorkerTask(void);
+static void sendOtaError(uint8_t code, const char* message);
 
 // ============================================================
 // Delayed restart after OTA
@@ -108,8 +134,73 @@ static void buildStatusPayload(uint8_t *payload)
         case OTAState::ERROR:      payload[0] = 4; break;
     }
     payload[1] = (uint8_t)(gApp.otaProgress * 100);
-    payload[2] = (gApp.otaState == OTAState::ERROR) ? 0xFF : 0;
+    if (gApp.otaState == OTAState::ERROR) {
+        uint8_t code = ota::getLastErrorCode();
+        payload[2] = (code == ota::OTA_ERR_NONE) ? 0xFF : code;
+    } else {
+        payload[2] = 0;
+    }
     strncpy((char *)&payload[3], ota::getRunningVersion(), 16);
+}
+
+static void sendOtaError(uint8_t code, const char* message)
+{
+    ota::setLastError(code, message);
+    gApp.otaState = OTAState::ERROR;
+    sendStatusNotify();
+}
+
+static void otaWorkerTask(void *param)
+{
+    s_otaWorkerHandle = xTaskGetCurrentTaskHandle();
+    s_otaWorkerRunning = true;
+    ESP_LOGI(TAG, "OTA worker started (free stack: %u)",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
+    OtaCommand cmd = {};
+    while (xQueueReceive(s_otaCmdQueue, &cmd, portMAX_DELAY) == pdTRUE) {
+        if (cmd.type == OtaCmdType::EXIT) {
+            break;
+        }
+
+        switch (cmd.type) {
+        case OtaCmdType::START: {
+            uint32_t stackProbe = 0;
+            if (!esp_ptr_internal(&stackProbe)) {
+                ESP_LOGE(TAG, "START rejected: OTA worker stack is not in internal RAM");
+                sendOtaError(ota::OTA_ERR_INTERNAL_STACK, "OTA worker stack must be internal RAM");
+                break;
+            }
+
+            s_lastNotifyPct = -1;
+            if (!ota::begin(cmd.imageSize)) {
+                sendStatusNotify();
+                break;
+            }
+            sendStatusNotify();
+            break;
+        }
+        case OtaCmdType::END:
+            if (!ota::end()) {
+                sendStatusNotify();
+                break;
+            }
+            sendStatusNotify();
+            scheduleRestart();
+            break;
+        case OtaCmdType::ABORT:
+            ota::abort();
+            sendStatusNotify();
+            break;
+        case OtaCmdType::EXIT:
+            break;
+        }
+    }
+
+    ESP_LOGI(TAG, "OTA worker exiting");
+    s_otaWorkerRunning = false;
+    s_otaWorkerHandle = nullptr;
+    vTaskDelete(NULL);
 }
 
 // ============================================================
@@ -133,39 +224,47 @@ static int onControlAccess(uint16_t conn_handle, uint16_t attr_handle,
         uint32_t imageSize;
         os_mbuf_copydata(ctxt->om, 1, 4, &imageSize);
         ESP_LOGI(TAG, "CMD START: %lu bytes", (unsigned long)imageSize);
-
-        // Guard against OTA begin on external-RAM task stack.
-        // This can trigger cache freeze asserts in esp_ota_begin().
-        uint32_t stackProbe = 0;
-        if (!esp_ptr_internal(&stackProbe)) {
-            ESP_LOGE(TAG, "CMD START rejected: callback stack is not in internal RAM");
-            snprintf(gApp.otaErrorMsg, sizeof(gApp.otaErrorMsg), "BLE host stack must be internal RAM");
-            gApp.otaState = OTAState::ERROR;
-            sendStatusNotify();
+        if (s_otaCmdQueue == nullptr || !s_otaWorkerRunning) {
+            ESP_LOGE(TAG, "CMD START rejected: OTA worker not running");
+            sendOtaError(ota::OTA_ERR_BUSY, "OTA worker not running");
             return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
         }
 
-        s_lastNotifyPct = -1;
-        if (!ota::begin(imageSize)) {
-            sendStatusNotify();
+        OtaCommand job = { OtaCmdType::START, imageSize };
+        if (xQueueSend(s_otaCmdQueue, &job, 0) != pdTRUE) {
+            ESP_LOGE(TAG, "CMD START rejected: OTA command queue full");
+            sendOtaError(ota::OTA_ERR_BUSY, "OTA queue full");
             return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
         }
-        sendStatusNotify();
         break;
     }
     case 0x02: // END
         ESP_LOGI(TAG, "CMD END");
-        if (!ota::end()) {
-            sendStatusNotify();
+        if (s_otaCmdQueue == nullptr || !s_otaWorkerRunning) {
+            sendOtaError(ota::OTA_ERR_BUSY, "OTA worker not running");
             return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
         }
-        sendStatusNotify();
-        scheduleRestart();
+        {
+            OtaCommand job = { OtaCmdType::END, 0 };
+            if (xQueueSend(s_otaCmdQueue, &job, 0) != pdTRUE) {
+                sendOtaError(ota::OTA_ERR_BUSY, "OTA queue full");
+                return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+            }
+        }
         break;
     case 0x03: // ABORT
         ESP_LOGI(TAG, "CMD ABORT");
-        ota::abort();
-        sendStatusNotify();
+        if (s_otaCmdQueue == nullptr || !s_otaWorkerRunning) {
+            sendOtaError(ota::OTA_ERR_BUSY, "OTA worker not running");
+            return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+        }
+        {
+            OtaCommand job = { OtaCmdType::ABORT, 0 };
+            if (xQueueSend(s_otaCmdQueue, &job, 0) != pdTRUE) {
+                sendOtaError(ota::OTA_ERR_BUSY, "OTA queue full");
+                return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+            }
+        }
         break;
     case 0x04: // VERSION
         sendStatusNotify();
@@ -425,6 +524,67 @@ static bool waitForFalse(volatile bool &flag, TickType_t timeoutTicks)
     return true;
 }
 
+static esp_err_t startOtaWorkerTask(void)
+{
+    if (s_otaCmdQueue == nullptr) {
+        s_otaCmdQueue = xQueueCreate(OTA_CMD_QUEUE_LEN, sizeof(OtaCommand));
+        if (s_otaCmdQueue == nullptr) {
+            ESP_LOGE(TAG, "Failed to create OTA command queue");
+            return ESP_ERR_NO_MEM;
+        }
+    } else {
+        xQueueReset(s_otaCmdQueue);
+    }
+
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+    const BaseType_t workerCore = (CONFIG_BT_NIMBLE_PINNED_TO_CORE == 0) ? 1 : 0;
+#else
+    const BaseType_t workerCore = CONFIG_BT_NIMBLE_PINNED_TO_CORE;
+#endif
+
+    TaskHandle_t h = xTaskCreateStaticPinnedToCore(
+        otaWorkerTask,
+        "ota_worker",
+        OTA_WORKER_STACK_WORDS,
+        NULL,
+        (configMAX_PRIORITIES - 6),
+        s_otaWorkerStack,
+        &s_otaWorkerTcb,
+        workerCore);
+    if (h == nullptr) {
+        ESP_LOGE(TAG, "Failed to create ota_worker task");
+        vQueueDelete(s_otaCmdQueue);
+        s_otaCmdQueue = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+    s_otaWorkerHandle = h;
+    ESP_LOGI(TAG, "ota_worker created (core=%ld, stack=%lu bytes, internal=%d)",
+             (long)workerCore,
+             (unsigned long)(OTA_WORKER_STACK_WORDS * sizeof(StackType_t)),
+             (int)esp_ptr_internal(s_otaWorkerStack));
+    return ESP_OK;
+}
+
+static void stopOtaWorkerTask(void)
+{
+    if (s_otaCmdQueue != nullptr && s_otaWorkerRunning) {
+        OtaCommand exitCmd = { OtaCmdType::EXIT, 0 };
+        if (xQueueSend(s_otaCmdQueue, &exitCmd, 0) != pdTRUE) {
+            xQueueReset(s_otaCmdQueue);
+            (void)xQueueSend(s_otaCmdQueue, &exitCmd, 0);
+        }
+        if (!waitForFalse(s_otaWorkerRunning, OTA_WORKER_STOP_TIMEOUT_TICKS)) {
+            ESP_LOGW(TAG, "OTA worker stop timeout");
+            return;
+        }
+    }
+
+    if (s_otaCmdQueue != nullptr) {
+        vQueueDelete(s_otaCmdQueue);
+        s_otaCmdQueue = nullptr;
+    }
+}
+
 static esp_err_t startNimbleHostTask(void)
 {
     const BaseType_t preferredCore = CONFIG_BT_NIMBLE_PINNED_TO_CORE;
@@ -526,6 +686,11 @@ esp_err_t startBleOta(void)
     s_synced = false;
     s_advertising = false;
     s_connHandle = BLE_HS_CONN_HANDLE_NONE;
+    ota::clearLastError();
+    gApp.otaState = OTAState::IDLE;
+    gApp.otaProgress = 0.0f;
+    gApp.otaReceivedBytes = 0;
+    gApp.otaTotalBytes = 0;
 
     ESP_LOGI(TAG, "=== BLE OTA init ===");
     ESP_LOGI(TAG, "Heap: free=%lu largest=%lu int_free=%lu int_largest=%lu",
@@ -599,6 +764,17 @@ esp_err_t startBleOta(void)
         return ret;
     }
 
+    ret = startOtaWorkerTask();
+    if (ret != ESP_OK) {
+        (void)nimble_port_stop();
+        (void)waitForFalse(s_hostTaskRunning, HOST_TASK_STOP_TIMEOUT_TICKS);
+        (void)nimble_port_deinit();
+        freeNimbleHostTaskBuffers();
+        forceBtControllerIdle();
+        s_starting = false;
+        return ret;
+    }
+
     s_active = true;
 
     if (!waitForTrue(s_synced, HS_SYNC_TIMEOUT_TICKS)) {
@@ -632,6 +808,7 @@ esp_err_t stopBleOta(void)
     if (ota::isInProgress()) {
         ota::abort();
     }
+    stopOtaWorkerTask();
 
     // 1. 愿묎퀬/?곌껐 以묒?
     ble_gap_adv_stop();

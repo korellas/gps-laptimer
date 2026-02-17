@@ -74,6 +74,8 @@ let deviceVersion = "";
 let transferring = false;
 let startTime = 0;
 let releaseAutoState = "loading"; // loading | ready | unavailable | failed
+let latestOtaState = STATE_IDLE;
+let latestOtaErrorCode = 0;
 
 // --- Logging ---
 function log(msg) {
@@ -93,6 +95,24 @@ function formatError(err) {
         return err.message;
     }
     return String(err);
+}
+
+function decodeOtaError(code) {
+    const map = {
+        0: "Unknown",
+        1: "Image too large",
+        2: "Validation failed",
+        3: "Low battery",
+        4: "Write failed",
+        5: "No OTA partition",
+        6: "OTA begin failed",
+        7: "Set boot partition failed",
+        8: "Internal stack required",
+        9: "OTA busy",
+        10: "OTA timeout",
+        11: "OTA aborted"
+    };
+    return map[code] || ("Error code: " + code);
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {
@@ -213,6 +233,8 @@ function onDisconnected() {
     dataChar = null;
     statChar = null;
     deviceVersion = "";
+    latestOtaState = STATE_IDLE;
+    latestOtaErrorCode = 0;
     $devVersion.textContent = "--";
 
     if (transferring) {
@@ -292,6 +314,8 @@ function onStatusNotify(event) {
     const state = data[0];
     const progress = data[1];
     const errorCode = data[2];
+    latestOtaState = state;
+    latestOtaErrorCode = errorCode;
 
     let version = "";
     if (data.length >= 19) {
@@ -334,8 +358,7 @@ function onStatusNotify(event) {
     }
 
     if (state === STATE_ERROR) {
-        const errors = ["Unknown", "Image too large", "Validation failed", "Low battery", "Write error"];
-        const msg = errors[errorCode] || ("Error code: " + errorCode);
+        const msg = decodeOtaError(errorCode);
         setTransferringUi(false);
         setProgressState("Error: " + msg, true);
         log("OTA error: " + msg);
@@ -549,6 +572,25 @@ async function startOta() {
         startCmd[4] = (size >> 24) & 0xFF;
         await ctrlChar.writeValue(startCmd);
         log("START sent, size=" + size);
+        setProgressState("Preparing device flash...", false);
+
+        const startWaitBegin = Date.now();
+        while (Date.now() - startWaitBegin < 30000) {
+            if (!ctrlChar) {
+                throw new Error("Device disconnected before OTA start");
+            }
+            if (latestOtaState === STATE_RECEIVING) {
+                break;
+            }
+            if (latestOtaState === STATE_ERROR) {
+                throw new Error("START rejected: " + decodeOtaError(latestOtaErrorCode));
+            }
+            await new Promise(function (resolve) { setTimeout(resolve, 100); });
+        }
+        if (latestOtaState !== STATE_RECEIVING) {
+            throw new Error("Timeout waiting for device to enter RECEIVING state");
+        }
+        log("Device accepted START and entered RECEIVING state.");
 
         setProgressState("Uploading firmware...", false);
         const bytes = new Uint8Array(firmware);
