@@ -75,36 +75,19 @@ static inline uint32_t millis(void) {
 }
 
 static constexpr time_t MIN_VALID_UTC_EPOCH = 1704067200;  // 2024-01-01 00:00:00 UTC
-static constexpr unsigned long RTC_RETRY_INTERVAL_MS = 5000;
+// OS=1(시간 무결성 손실) 감지 시 true → rtcWrite() 성공 후 false로 리셋
+static bool s_rtcOsInvalid = false;
 
 static bool isSystemClockValidUtc(time_t nowUtc) {
     return nowUtc >= MIN_VALID_UTC_EPOCH;
 }
 
-static bool trySyncSystemClockFromRTC(void) {
-    if (!rtcIsReady()) return false;
-
-    struct tm rtcTime = {};
-    if (!rtcRead(&rtcTime) || rtcTime.tm_year < (2024 - 1900)) {
-        return false;
-    }
-
-    time_t utcEpoch = mktime(&rtcTime);
-    struct timeval tv = { .tv_sec = utcEpoch, .tv_usec = 0 };
-    settimeofday(&tv, NULL);
-    gApp.gpsTimeSet = true;
-
-    ESP_LOGI(TAG, "System clock refreshed from RTC: %04d-%02d-%02d %02d:%02d:%02d UTC",
-             rtcTime.tm_year + 1900, rtcTime.tm_mon + 1, rtcTime.tm_mday,
-             rtcTime.tm_hour, rtcTime.tm_min, rtcTime.tm_sec);
-    return true;
-}
-
 static bool readValidRtcUtc(struct tm* outUtc) {
-    if (!outUtc || !rtcIsReady()) return false;
+    if (!outUtc || !rtcIsReady() || s_rtcOsInvalid) return false;
 
     struct tm rtcTime = {};
     if (!rtcRead(&rtcTime) || rtcTime.tm_year < (2024 - 1900)) {
+        s_rtcOsInvalid = true;  // OS=1: rtcWrite() 전까지 폴링 중단
         return false;
     }
 
@@ -390,18 +373,17 @@ void updateDisplayData(const GPSPoint& point, const DeltaResult& delta,
                      ubx.year, ubx.month, ubx.day, ubx.hour, ubx.minute, ubx.second);
 
             // GPS 시간을 RTC에 저장 (다음 부팅 시 즉시 사용)
-            if (rtcIsReady()) {
-                rtcWrite(&gpsTime);
+            if (rtcIsReady() && rtcWrite(&gpsTime)) {
+                s_rtcOsInvalid = false;  // OS bit 클리어됨, 다음 읽기 허용
             }
         }
     }
 
     // 시스템 시계에서 KST(UTC+9) 시간 표시 — 1초에 1번만 업데이트
     // Time display source policy:
-    // 1) Prefer RTC whenever RTC holds valid time.
-    // 2) If RTC is invalid/reset, fallback to valid system clock.
+    // 1) Prefer RTC whenever RTC holds valid time (OS=0).
+    // 2) OS=1이면 rtcWrite() 전까지 RTC 읽기 생략, system clock fallback.
     // 3) Otherwise keep time hidden.
-    static unsigned long s_lastRtcRetryMs = 0;
     static unsigned long lastTimeUpdateMs = 0;
     unsigned long nowMs = millis();
     if (nowMs - lastTimeUpdateMs >= 1000) {
@@ -409,13 +391,6 @@ void updateDisplayData(const GPSPoint& point, const DeltaResult& delta,
 
         struct tm utcSource = {};
         bool hasRtcTime = readValidRtcUtc(&utcSource);
-
-        if (!hasRtcTime && !gApp.gpsTimeSet &&
-            (nowMs - s_lastRtcRetryMs >= RTC_RETRY_INTERVAL_MS)) {
-            s_lastRtcRetryMs = nowMs;
-            (void)trySyncSystemClockFromRTC();
-            hasRtcTime = readValidRtcUtc(&utcSource);
-        }
 
         if (hasRtcTime) {
             gApp.gpsTimeSet = true;

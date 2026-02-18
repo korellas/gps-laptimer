@@ -419,7 +419,7 @@ static void initHttpServer(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = ENABLE_LIVE_LOG_WS ? 12 : 11;
-    config.max_open_sockets = 3;
+    config.max_open_sockets = 2;  // 3→2: save ~11KB internal RAM for WiFi DMA TX
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 4096;
 
