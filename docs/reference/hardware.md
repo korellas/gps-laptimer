@@ -1,6 +1,6 @@
 # 하드웨어 사양
 
-**상태:** 2026-02-16 기준 최신
+**상태:** 2026-02-19 기준 최신
 **SSOT:** 하드웨어 사양의 단일 정보원
 
 ## 1. 메인 보드
@@ -301,7 +301,7 @@ M10 시리즈는 **레거시 UBX-CFG-*** 미지원. `UBX-CFG-VALSET` (Class=0x06
 
 ## 6. IMU (QMI8658C)
 
-**상태:** 하드웨어 존재, 소프트웨어 미통합
+**상태:** 통합 완료 (v1.1.0)
 
 | 구성 요소 | 사양 |
 |-----------|------|
@@ -317,17 +317,19 @@ M10 시리즈는 **레거시 UBX-CFG-*** 미지원. `UBX-CFG-VALSET` (Class=0x06
 **참조:**
 - 데이터시트: https://files.waveshare.com/wiki/common/QMI8658C_datasheet_rev_0.9.pdf
 
-### 6.1 계획된 활용
+### 6.1 현재 활용
 
-- **가속도 데이터 로깅:** 캘리브레이션된 종방향/횡방향 가속도 기록
-- **캘리브레이션:** 정지 시 중력가속도 방향으로 축 보정
-- **향후:** Dead Reckoning 보정, G-force 분석, 코너링 분석
+- **Sensor Fusion:** GPS velNED 차분 vs IMU 가속도 → Wahba's problem (SVD) → 회전 행렬 R (sensor→NED)
+- **Speed Kalman Filter:** predict@100Hz (IMU fwdAccel), update@10Hz (GPS 속도) → GPS 단절 시 터널 속도 추정
+- **캘리브레이션 저장:** `/spiffs/config/imu_fusion.json` (부팅 시 재사용)
+- **드라이버:** `components/imu/qmi8658c.cpp` — 100Hz 가속도+자이로, ±8g / ±512°/s
+- **AppContext 통합:** `gApp.imuData`, `gApp.imuCalibration`, `gApp.imuReady`, `gApp.fusedSpeedKmh` 등
 
-> **참고:** 보드 장착 방향이 차량 기준으로 정확히 정렬되지 않을 수 있음. 정지 상태에서 중력가속도를 기준으로 캘리브레이션하되, 정밀도에 한계가 있음을 감안.
+> **참고:** IMU는 `imuTask` (Core 1, 100Hz)에서 읽고 Kalman predict. GPS 수신 시에는 GPS 속도를 직접 사용, GPS 단절 시에만 융합 속도 활용.
 
 ## 7. RTC (PCF85063)
 
-**상태:** 하드웨어 존재, 소프트웨어 미통합
+**상태:** 드라이버 구현 완료 (v1.0.0), GPS 시간 동기화 연동
 
 | 구성 요소 | 사양 |
 |-----------|------|
@@ -358,15 +360,15 @@ M10 시리즈는 **레거시 UBX-CFG-*** 미지원. `UBX-CFG-VALSET` (Class=0x06
 
 > **참고:** 시간 레지스터는 0x04부터 7바이트 연속 읽기. BCD→10진 변환 필요.
 
-### 7.2 계획된 활용
+### 7.2 현재 활용
 
-- **GPS 시간 동기화:** GPS fix 시 UTC 시간으로 RTC 업데이트 (자주 할 필요 없음)
-- **독립 시간 유지:** GPS 없이도 현재 날짜/시간 표시
-- **세션 타임스탬프:** 랩 데이터에 실제 시간 기록
+- **GPS 시간 동기화:** GPS fix 시 `settimeofday()`로 시스템 시계 설정 (최초 1회, `gApp.gpsTimeSet`)
+- **Status Bar 시계:** KST(UTC+9) 12시간제 표시, GPS 동기화 전 `--:--`
+- **드라이버:** `components/rtc/pcf85063.cpp`
 
 ## 8. SD 카드
 
-**상태:** 하드웨어 존재, 소프트웨어 미통합
+**상태:** 통합 완료 (v1.0.0)
 
 | 구성 요소 | 사양 |
 |-----------|------|
@@ -392,21 +394,23 @@ M10 시리즈는 **레거시 UBX-CFG-*** 미지원. `UBX-CFG-VALSET` (Class=0x06
 // 미포맷 카드 자동 포맷: 지원 (format_if_mount_failed)
 ```
 
-### 8.3 계획된 활용
+### 8.3 현재 활용
 
-- **데이터 로깅:** 랩 데이터, 가속도 로그
-- **트랙 정보:** 트랙 정의 파일 (피니시라인, 섹터 좌표)
-- **설정 백업:** 사용자 설정 저장/복원
+- **GPS 트랙 로깅:** 세션 CSV + 이벤트 로그 (`components/sd_logger/`)
+- **랩 데이터 저장:** SD 마운트 시 SPIFFS 대신 SD에 우선 저장 (`/sdcard/laps/`)
+- **디스플레이 설정:** `/sdcard/display_config.json` (선택)
+- **드라이버:** `components/sdcard/sdcard_manager.cpp` (SDMMC 1-bit FAT)
 
-> **참고:** PC에서 미리 FAT32로 포맷할 필요 없음. 코드에서 자동 포맷 처리 가능.
+> **참고:** SD 카드 없어도 동작 (SPIFFS fallback). `gApp.sdCardMounted`로 상태 확인.
 
 ## 9. 내부 저장소
 
 | 구성 요소 | 사양 |
 |-----------|------|
 | **유형** | SPIFFS (SPI Flash File System) |
-| **파티션 크기** | 1 MB (`partitions.csv`에서 설정 가능) |
-| **사용 사례** | 랩 데이터 저장, 레퍼런스 랩, 설정 |
+| **파티션 크기** | 2 MB (`partitions.csv` `storage` 파티션) |
+| **마운트 포인트** | `/spiffs` |
+| **사용 사례** | 랩 데이터 저장, IMU 캘리브레이션, 설정 |
 
 ### 9.1 파티션 테이블
 
@@ -452,19 +456,19 @@ storage,    data, spiffs,  0xC20000,  0x200000   # 2MB
 | **ADC 채널** | ADC1_CHANNEL_3 (GPIO4) |
 | **전압 범위** | 0-3.3V (전압 분배기 사용) |
 | **배터리 유형** | Li-ion/Li-Po (3.0-4.2V 가정) |
-| **ADC 감쇠** | ADC_ATTEN_DB_11 (0-3.3V) |
+| **ADC 감쇠** | ADC_ATTEN_DB_12 (0-3.3V, ESP-IDF 5.x 명칭) |
 
 **구성:**
 ```c
-#define BATTERY_ADC_CHANNEL ADC1_CHANNEL_3  // GPIO4 (IO4)
-#define BATTERY_ADC_ATTEN   ADC_ATTEN_DB_11
-#define BATTERY_VOLTAGE_MAX 4.2f  // 완전 충전 (Li-ion)
-#define BATTERY_VOLTAGE_MIN 3.0f  // 방전
+// config.h
+constexpr float BATTERY_DIVIDER_FACTOR = 3.0f;  // 3:1 전압 분배기
+// ADC 읽기: ADC_ATTEN_DB_12, 12-bit, 13회 오버샘플링 + 상하위 25% 트리밍
 ```
 
-**참고:** 전압 분배기 비율은 테스트를 통해 결정해야 합니다. 일반적인 값:
-- R1 = 100kΩ, R2 = 100kΩ → 2:1 분배기 (4.2V → 2.1V)
-- 멀티미터로 실제 전압 측정하여 교정 필요
+**측정 방식 (코드 기준):**
+- 13회 오버샘플링 + 상하위 25% 트리밍 + 중간값 평균
+- 21-entry LiPo 방전 곡선 LUT + 선형 보간 → SoC% 계산
+- EWMA 방전율 추적 (alpha=0.05) → `gApp.batteryPercent`에 반영
 
 ## 11. 오디오 (마이크 및 스피커)
 

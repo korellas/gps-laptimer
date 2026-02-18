@@ -1,6 +1,6 @@
 # UI 사양
 
-**상태:** 2026-02-15 기준 최신
+**상태:** 2026-02-19 기준 최신 (코드 기준 v1.1.0)
 **SSOT:** UI 레이아웃 및 시각 디자인의 단일 정보원
 
 ## 1. 디스플레이 구성
@@ -10,7 +10,7 @@
 | **해상도** | 640×172 픽셀 (가로) |
 | **색 심도** | RGB565 (16비트) |
 | **UI 프레임워크** | LVGL 9.x |
-| **업데이트 속도** | 30 Hz (33ms 간격) |
+| **업데이트 속도** | 60 Hz (16ms 간격, `DISPLAY_UPDATE_INTERVAL_MS`) |
 | **방향** | 가로 (패널 네이티브에서 90° 회전) |
 
 ## 2. 전체 레이아웃
@@ -134,8 +134,9 @@
 | 속도 델타 | 기본값 | 20pt | Regular |
 
 **폰트 파일:**
-- Share Tech Mono: `main/fonts/ShareTechMono-Regular.ttf`
-- 기본값: LVGL 내장 폰트
+- Share Tech Mono TTF: `font/share_tech_mono_ttf/ShareTechMono-Regular.ttf`
+- 생성된 LVGL 비트맵: `font/generated/share_tech_mono_{24,28,32,56}.c`
+- 기본값: LVGL 내장 폰트 (montserrat_14 등)
 
 ## 6. 레이아웃 치수 (대략)
 
@@ -227,7 +228,7 @@
 | 섹터 델타 (현재) | 10 Hz | 실시간 계산 |
 | 섹터 델타 (완료) | 이벤트 발생 시 | 섹터 경계 통과 |
 | 속도 바 | 10 Hz | 속도 델타 업데이트 |
-| 디스플레이 리프레시 | 30 Hz | LVGL 타이머 (33ms) |
+| 디스플레이 리프레시 | 60 Hz | LVGL 타이머 (16ms) |
 
 ## 10. 디스플레이 데이터 구조
 
@@ -257,7 +258,7 @@ LVGL 렌더
 
 ### 11.2 성능 고려사항
 - LVGL 틱: 16ms (LVGL_TICK_PERIOD_MS)
-- 디스플레이 루프: 33ms (30 Hz)
+- 디스플레이 루프: 16ms (60 Hz, `DISPLAY_UPDATE_INTERVAL_MS`)
 - 렌더 경로에서 블로킹 작업 피하기
 - 큰 전송에는 DMA 사용
 - 세마포어를 통한 플러시 동기화
@@ -267,4 +268,4 @@ LVGL 렌더
 - **하드웨어 사양:** [hardware.md](hardware.md)
 - **아키텍처:** [architecture.md](architecture.md)
 - **데이터 구조:** [data-structures.md](data-structures.md)
-- **폰트 파일:** `main/fonts/ShareTechMono-Regular.ttf`
+- **폰트 파일:** `font/share_tech_mono_ttf/ShareTechMono-Regular.ttf`

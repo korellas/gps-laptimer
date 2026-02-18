@@ -55,14 +55,14 @@ idf.py -p COM3 flash monitor
 
 ### 3. First Run
 
-After flashing, the device boots into **Simulation mode** (replays Everland track data).
+After flashing, the device boots in **GPS hardware mode**. Switch to Simulation mode with the `e` serial command to test without a GPS module (replays Everland track data).
 
 **Serial commands:**
 - `e` - Switch between GPS and Simulation modes
 - `h` - Show help with all commands
 - `s` - Show status
 
-**See:** [CLAUDE.md](CLAUDE.md) for quick reference
+**See:** [docs/guides/quick-start.md](docs/guides/quick-start.md) for quick reference
 
 ---
 
@@ -74,10 +74,10 @@ After flashing, the device boots into **Simulation mode** (replays Everland trac
 
 | Document | Description |
 |----------|-------------|
-| [CLAUDE.md](CLAUDE.md) | Quick reference and dev context |
 | [docs/reference/architecture.md](docs/reference/architecture.md) | System architecture |
 | [docs/reference/hardware.md](docs/reference/hardware.md) | Hardware specifications |
 | [docs/reference/ui-specification.md](docs/reference/ui-specification.md) | UI layout and design |
+| [docs/reference/data-structures.md](docs/reference/data-structures.md) | Data structures reference |
 | [docs/planning/roadmap.md](docs/planning/roadmap.md) | Feature roadmap |
 
 ---
@@ -99,24 +99,24 @@ gps_laptimer/
 
 ---
 
-## Current Status (2026-02-14)
+## Current Status (v1.1.0, 2026-02-19)
 
 **Implemented:**
-- ✅ Sector timing (3 sectors, distance-based)
-- ✅ Delta calculation (time + speed)
-- ✅ LVGL UI (640×172 landscape)
-- ✅ Simulation mode (Everland track)
-- ✅ GPS hardware mode (u-blox G10A-F33)
-- ✅ SPIFFS lap storage
-
-**In Progress:**
-- 🔄 Documentation reorganization (SSOT)
-- 🔄 Multi-track support planning
-
-**Planned:**
-- 📋 Track auto-detection
-- 📋 Touch-based settings menu
-- 📋 OTA updates
+- ✅ Sector timing (distance-based, per-track layout)
+- ✅ Delta calculation (time + speed, Kalman-smoothed)
+- ✅ Page system (10 pages: ModeSelect, WaitGPS, PreTrack, Laptimer, Emulation, GPSStatus, Settings, BleOTA, PhonePlate, Transition)
+- ✅ Multi-track support (Everland full/short, Inje Speedium full/south/north)
+- ✅ Track auto-detection via finish-line crossing at 60+ km/h
+- ✅ Sensor fusion (Wahba SVD axis calibrator + 1D Speed Kalman filter)
+- ✅ LVGL UI (640×172 landscape, 60 Hz, gesture support)
+- ✅ Simulation mode (Everland track replay)
+- ✅ GPS hardware mode (u-blox G10A-F33, 10 Hz, 115200 baud)
+- ✅ Per-track best lap storage (SD card with SPIFFS fallback)
+- ✅ SD card logging (GPS track CSV + event log)
+- ✅ WiFi captive portal (SoftAP "LAPTIMER", settings UI)
+- ✅ BLE OTA firmware update
+- ✅ Battery monitoring (LiPo discharge curve, SoC%)
+- ✅ Auto power-off (5 min backlight off, 30 min power off)
 
 **See:** [docs/planning/roadmap.md](docs/planning/roadmap.md)
 
@@ -151,9 +151,8 @@ We follow **SSOT (Single Source of Truth)** for documentation:
 - Other docs link to the reference (no duplication)
 
 **Before contributing:**
-1. Read [CLAUDE.md](CLAUDE.md)
-2. Check [docs/planning/roadmap.md](docs/planning/roadmap.md)
-3. Follow coding style (4 spaces, camelCase functions, UPPER_SNAKE_CASE constants)
+1. Check [docs/planning/roadmap.md](docs/planning/roadmap.md)
+2. Follow coding style (4 spaces, camelCase functions, UPPER_SNAKE_CASE constants)
 
 ---
 

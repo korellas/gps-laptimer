@@ -6,7 +6,51 @@ GPS 랩 타이머 프로젝트의 모든 주목할 만한 변경사항.
 
 ---
 
+## [1.1.0] - 2026-02-19
+
+### 추가됨
+- **페이지 시스템** — PageManager + Page 인터페이스 기반 10개 페이지 (ModeSelect, PhonePlate, WaitGPS, BleOTA, Settings, GPSStatus, PreTrack, Laptimer, Emulation, Transition)
+- **센서 퓨전** — Wahba's problem (SVD) 축 캘리브레이터 + 1D Speed Kalman 필터
+  - 캘리브레이션: GPS velNED 차분 vs IMU 가속도 → 회전 행렬 R (sensor→NED)
+  - Speed KF: predict@100Hz (IMU fwdAccel), update@10Hz (GPS 속도)
+  - 저장: `/spiffs/config/imu_fusion.json`, 부팅 시 재사용
+  - GPS 단절(터널) 시에만 융합 속도 활용, 평상시 raw GPS 속도 사용
+- **결승선 통과로 트랙 식별** — PRE_TRACK 상태에서 60+ km/h 시 모든 트랙 피니시라인 동시 체크 → 트랙 자동 식별
+- **트랙별 베스트랩 저장** — `best_{trackId}_{layoutId}.bin`, LapHeader에 trackIndex/layoutIndex 포함 (v2 포맷)
+- **인제스피디움 레이아웃 추가** — full, south, north 3개 레이아웃
+- **PreTrack 페이지** — 센서 퓨전 캘리브레이션 진행 상태 표시
+
+### 변경됨
+- **세션 상태머신 단순화** — NEAR_TRACK 상태 제거, PRE_TRACK → SESSION_ACTIVE 직접 전환
+- **기본 GPS 모드** — 부팅 시 `GPSMode::GPS_HARDWARE` (기존: SIMULATION)
+- **GPS 부팅 즉시 활성화** — 어느 페이지에서나 GPS 켜져 있음, WiFi는 SETTINGS 페이지에서만 시작
+
+---
+
+## [1.0.0] - 2026-02-17
+
+### 추가됨
+- **SD 카드 로깅** — 세션 CSV + 이벤트 로그 (`sd_logger` 컴포넌트)
+- **WiFi 파일 브라우저** — 설정 페이지에서 SoftAP 시작, HTTP 파일 브라우저 및 OTA UI
+
+### 수정됨
+- **인제 피니시라인 좌표** — 정밀 GPS 측정값으로 업데이트
+
+---
+
+## [0.9.11] - 2026-02-16
+
+### 추가됨
+- **인제스피디움 초기 추가** — full 레이아웃 피니시라인 및 기본 섹터
+- **BLE OTA** — `ble_ota` 컴포넌트, BleOTA 페이지
+- **전력 관리** — PM DFS (80-160MHz) + Tickless Idle
+- **프로덕션 빌드 설정** — `sdkconfig.defaults.prod` (WARN 로그, silent assertions)
+
+---
+
 ## [Unreleased]
+
+_아래는 릴리스 태그 이전에 개발된 항목들 (v0.4.0 ~ v0.9.10 구간)_
 
 ### 추가됨
 - SSOT 문서화 구조 (reference/, planning/, development/, guides/)
