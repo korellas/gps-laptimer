@@ -996,23 +996,29 @@ void updateLapData(void)
 {
     // ─── PRE_TRACK 모드: 속도 + 현재 시각 표시 (세션 시작 전) ───
     if (s_preTrackMode) {
-        // GPS 속도
-        float speedKmh = (float)gframe.speed / 1000.0f;
+        // GPS 속도 (gApp.currentPoint는 gps_processor에서 GPS 수신 시마다 업데이트)
+        int speedKmh = (int)gApp.currentPoint.speedKmh;
         char speedBuf[16];
-        snprintf(speedBuf, sizeof(speedBuf), "%.0f km/h", speedKmh);
+        snprintf(speedBuf, sizeof(speedBuf), "%d km/h", speedKmh);
 
-        // 현재 시각 (HH:MM:SS)
-        char clockBuf[16] = "";
-        time_t now_t = time(nullptr);
-        struct tm tmInfo = {};
-        localtime_r(&now_t, &tmInfo);
-        snprintf(clockBuf, sizeof(clockBuf), "%02d:%02d:%02d",
-                 tmInfo.tm_hour, tmInfo.tm_min, tmInfo.tm_sec);
+        // 하단 텍스트: NEAR_TRACK이면 트랙 이름, 아니면 현재 시각
+        char bottomBuf[72] = "";
+        if (s_preTrackName[0] != '\0') {
+            // NEAR_TRACK: 트랙 이름 표시 (진단용)
+            snprintf(bottomBuf, sizeof(bottomBuf), ">> %s <<", s_preTrackName);
+        } else {
+            // PRE_TRACK: 현재 시각 (HH:MM:SS)
+            time_t now_t = time(nullptr);
+            struct tm tmInfo = {};
+            localtime_r(&now_t, &tmInfo);
+            snprintf(bottomBuf, sizeof(bottomBuf), "%02d:%02d:%02d",
+                     tmInfo.tm_hour, tmInfo.tm_min, tmInfo.tm_sec);
+        }
 
         if (lvgl_lock(10)) {
             if (lbl_delta)    lv_label_set_text(lbl_delta, speedBuf);
             if (lbl_datetime) {
-                lv_label_set_text(lbl_datetime, clockBuf);
+                lv_label_set_text(lbl_datetime, bottomBuf);
                 lv_obj_clear_flag(lbl_datetime, LV_OBJ_FLAG_HIDDEN);
             }
             lvgl_unlock();
@@ -2257,7 +2263,7 @@ void displayLoop(void)
     }
 
     if (tvalid) updateTimeData();
-    if (lvalid) updateLapData();
+    if (lvalid || s_preTrackMode) updateLapData();
     if (gvalid) updateGpsData();
     // lv_timer_handler() is now processed by dedicated LVGL task (lvgl_port_task)
     // Touch input is handled by LVGL indev callback (lvgl_touch_read_cb)

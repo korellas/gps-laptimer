@@ -15,4 +15,5 @@ idf_component_register(
         dns_server
         common
         ota
+        sdcard
 )

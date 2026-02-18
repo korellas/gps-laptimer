@@ -177,7 +177,7 @@ static bool parseUbxMessage(const uint8_t* data, uint16_t len) {
             s_lastLoggedFixType = lastData.fixType;
         }
         if (lastData.satellites != s_lastLoggedSats) {
-            ESP_LOGI(TAG, "Satellites: %d (fix=%d)", lastData.satellites, lastData.fixType);
+            ESP_LOGD(TAG, "Satellites: %d (fix=%d)", lastData.satellites, lastData.fixType);
             s_lastLoggedSats = lastData.satellites;
         }
 

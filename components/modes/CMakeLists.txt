@@ -10,4 +10,5 @@ idf_component_register(
         track
         timing
         common
+        sd_logger
 )

@@ -29,6 +29,7 @@ idf_component_register(
         rtc
         imu
         sdcard
+        sd_logger
         ota
         ble_ota
 )

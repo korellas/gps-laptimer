@@ -20,6 +20,7 @@
 #include "../geo/gps_filter.h"
 #include "../geo/dead_reckoning.h"
 #include "../track/track_manager.h"
+#include "sd_logger.h"
 
 #include <cstdio>
 
@@ -102,6 +103,10 @@ static void startSession(unsigned long nowMs) {
 
     startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber);
 
+    // SD 카드 세션 CSV 시작
+    sdSessionStart();
+    sdLogEvent(nowMs, "SESSION", "START");
+
     // 동적 섹터 경계 설정
     setupSectorBoundariesFromActiveTrack();
 
@@ -140,6 +145,10 @@ void initializeGPSMode() {
     enableGPSModule();
 
     initializeGPSProcessor();
+
+    // SD 카드 로거 초기화 (GPS 모드 진입 시)
+    sdLoggerInit();
+    sdLogEvent(0, "GPS_MODE", "INIT");
 
     // 세션 상태 초기화 (트랙 감지는 processRealGPS()의 PRE_TRACK 상태에서)
     s_sessionState = GPSSessionState::PRE_TRACK;
@@ -181,6 +190,10 @@ void resetRealGPS() {
     resetGPSFilter();
     resetDeadReckoning();
     resetTrackManager();
+
+    // 세션 CSV 닫기
+    sdSessionEnd();
+    sdLogEvent(0, "GPS_MODE", "RESET");
 
     setPreTrackMode(true, nullptr);
 
@@ -253,7 +266,11 @@ void processRealGPS() {
 
                     s_sessionState = GPSSessionState::NEAR_TRACK;
                     setPreTrackMode(true, trackName);
+                    sdLogEvent(now, "TRACK", trackName ? trackName : "?");
                 }
+                // SD 로그: PRE_TRACK GPS
+                sdLogGPS(now, point.lat, point.lng, point.speedKmh, point.headingDeg,
+                         ubx.fixType, ubx.satellites, "PRE_TRACK", 0);
                 // PRE_TRACK: 디스플레이는 setPreTrackMode(true)가 처리
                 gApp.previousPoint = gApp.currentPoint;
                 gApp.currentPoint = point;
@@ -268,6 +285,7 @@ void processRealGPS() {
                     ESP_LOGI(TAG, "NEAR_TRACK → PRE_TRACK (left proximity)");
                     s_sessionState = GPSSessionState::PRE_TRACK;
                     setPreTrackMode(true, nullptr);
+                    sdLogEvent(now, "TRACK", "LEFT_PROXIMITY");
                     gApp.previousPoint = gApp.currentPoint;
                     gApp.currentPoint = point;
                     gotNewData = true;
@@ -292,6 +310,9 @@ void processRealGPS() {
                     }
                 }
 
+                // SD 로그: NEAR_TRACK GPS
+                sdLogGPS(now, point.lat, point.lng, point.speedKmh, point.headingDeg,
+                         ubx.fixType, ubx.satellites, "NEAR_TRACK", 0);
                 // NEAR_TRACK: 속도+시각 표시 유지 (PRE_TRACK 디스플레이)
                 gApp.previousPoint = gApp.currentPoint;
                 gApp.currentPoint = point;
@@ -309,9 +330,19 @@ void processRealGPS() {
                                         point.speedKmh, point.headingDeg);
                 }
 
+                // SD 로그: SESSION_ACTIVE GPS + 세션 CSV
+                sdLogGPS(now, point.lat, point.lng, point.speedKmh, point.headingDeg,
+                         ubx.fixType, ubx.satellites, "SESSION_ACTIVE", lapTimeMs);
+                sdSessionPoint(gApp.currentLapNumber, lapTimeMs,
+                               point.lat, point.lng, point.speedKmh, point.headingDeg);
+
                 // ─── 피니시라인 감지 ───
                 if (lapTimeMs > MIN_LAP_TIME_MS) {
                     if (checkLineCrossing(point.lat, point.lng, point.headingDeg, lapTimeMs)) {
+                        char lapMsg[32];
+                        snprintf(lapMsg, sizeof(lapMsg), "LAP%u:%lums",
+                                 (unsigned)gApp.currentLapNumber, lapTimeMs);
+                        sdLogEvent(now, "LAP_COMPLETE", lapMsg);
                         onLapComplete(lapTimeMs);
                         gpsState.lapStartMs = now;
                         ESP_LOGI(TAG, "New lap started");

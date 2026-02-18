@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "sd_logger.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        sdcard
+        log
+        esp_timer
+)

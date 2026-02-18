@@ -158,14 +158,14 @@ constexpr SectorBoundaryCoord SECTOR_BOUNDARIES[SECTOR_BOUNDARY_COUNT] = {
     {SECTOR_3_4_LAT, SECTOR_3_4_LNG},
 };
 
-// Finish line coordinates
-// Start/Finish: 38°00'08.24"N 128°17'29.03"E
-// Track heading ~61° (ENE) at finish; perpendicular line at bearing 151°/331°
-// Two points ~30m apart across the track
-constexpr double FINISH_LINE_A_LAT = 38.002407;  // NW side
-constexpr double FINISH_LINE_A_LNG = 128.291314;
-constexpr double FINISH_LINE_B_LAT = 38.002171;  // SE side
-constexpr double FINISH_LINE_B_LNG = 128.291480;
+// Finish line coordinates (measured on-site)
+// P1: 38°00'02.10"N 128°17'28.00"E  →  38.000583, 128.291111
+// P2: 38°00'02.02"N 128°17'29.46"E  →  38.000561, 128.291517
+// Line runs nearly E-W (~35.7m), cars cross heading roughly N (340°~60°)
+constexpr double FINISH_LINE_A_LAT = 38.000583;  // western end
+constexpr double FINISH_LINE_A_LNG = 128.291111;
+constexpr double FINISH_LINE_B_LAT = 38.000561;  // eastern end
+constexpr double FINISH_LINE_B_LNG = 128.291517;
 
 // Sector definitions (4 sectors with boundary line detection)
 // Boundary lines are perpendicular cuts at each sector boundary GPS point
@@ -218,8 +218,8 @@ static const TrackLayout LAYOUTS[] = {
             FINISH_LINE_A_LNG,      // lng1
             FINISH_LINE_B_LAT,      // lat2
             FINISH_LINE_B_LNG,      // lng2
-            35.0f,                  // validHeadingMin (ENE direction)
-            85.0f                   // validHeadingMax
+            340.0f,                 // validHeadingMin (northward, wraps around 0°)
+            60.0f                   // validHeadingMax
         },
 
         // Timing expectations (Inje Speedium: ~3.908km)

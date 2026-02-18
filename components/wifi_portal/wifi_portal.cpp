@@ -36,12 +36,15 @@
 #include "esp_heap_caps.h"
 #include "cJSON.h"
 
+#include <dirent.h>
+
 #include "dns_server.h"
 #include "types.h"
 #include "wifi_portal.h"
 #include "log_ringbuffer.h"
 #include "wifi_portal_html.h"
 #include "ota_manager.h"
+#include "sdcard_manager.h"
 
 static const char *TAG = "wifi_portal";
 
@@ -377,6 +380,154 @@ static esp_err_t handleOtaStatus(httpd_req_t *req)
     return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
 }
 
+// ============================================================
+// SD 카드 파일 브라우저
+// ============================================================
+
+// GET /files  → SD 카드 logs/laps 파일 목록 HTML
+// Filenames on our SD card are always short (≤20 chars); suppress truncation
+// warnings that assume the theoretical maximum of 255 chars.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+static esp_err_t handleFileList(httpd_req_t *req)
+{
+    updateActivity();
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+
+    const char* header =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>SD Files</title>"
+        "<style>body{font-family:monospace;background:#111;color:#eee;padding:16px}"
+        "a{color:#4af;text-decoration:none}a:hover{text-decoration:underline}"
+        "h2{color:#4af}ul{list-style:none;padding:0}li{padding:4px 0}"
+        ".sz{color:#888;font-size:0.85em}</style></head><body>"
+        "<h2>SD Card Files</h2>";
+    httpd_resp_sendstr_chunk(req, header);
+
+    if (!sdcardIsMounted()) {
+        httpd_resp_sendstr_chunk(req, "<p style='color:#f44'>SD card not mounted</p>");
+        httpd_resp_sendstr_chunk(req, "</body></html>");
+        return httpd_resp_sendstr_chunk(req, NULL);
+    }
+
+    const char* dirs[] = { "/sdcard/logs", "/sdcard/laps" };
+    char buf[256];
+
+    for (int d = 0; d < 2; d++) {
+        snprintf(buf, sizeof(buf), "<h3>%s</h3><ul>", dirs[d] + 8); // skip "/sdcard"
+        httpd_resp_sendstr_chunk(req, buf);
+
+        DIR* dir = opendir(dirs[d]);
+        if (!dir) {
+            httpd_resp_sendstr_chunk(req, "<li>(empty)</li></ul>");
+            continue;
+        }
+
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_name[0] == '.') continue;
+
+            char fullPath[128];
+            snprintf(fullPath, sizeof(fullPath), "%s/%s", dirs[d], entry->d_name);
+
+            // If it's a directory (e.g., laps/YYYY-MM-DD), list its contents
+            struct stat st = {};
+            stat(fullPath, &st);
+
+            if (S_ISDIR(st.st_mode)) {
+                snprintf(buf, sizeof(buf),
+                         "<li><b>%s/</b><ul>", entry->d_name);
+                httpd_resp_sendstr_chunk(req, buf);
+
+                DIR* subdir = opendir(fullPath);
+                if (subdir) {
+                    struct dirent* sub;
+                    while ((sub = readdir(subdir)) != NULL) {
+                        if (sub->d_name[0] == '.') continue;
+                        char subPath[160];
+                        snprintf(subPath, sizeof(subPath), "%s/%s", fullPath, sub->d_name);
+                        struct stat ss = {};
+                        stat(subPath, &ss);
+                        // path for download: strip /sdcard prefix
+                        const char* dlPath = subPath + 7;  // "/sdcard" = 7 chars
+                        snprintf(buf, sizeof(buf),
+                                 "<li><a href='/api/file?p=%s' download>%s</a>"
+                                 " <span class='sz'>(%ld B)</span></li>",
+                                 dlPath, sub->d_name, (long)ss.st_size);
+                        httpd_resp_sendstr_chunk(req, buf);
+                    }
+                    closedir(subdir);
+                }
+                httpd_resp_sendstr_chunk(req, "</ul></li>");
+            } else {
+                const char* dlPath = fullPath + 7;  // "/sdcard" = 7 chars
+                snprintf(buf, sizeof(buf),
+                         "<li><a href='/api/file?p=%s' download>%s</a>"
+                         " <span class='sz'>(%ld B)</span></li>",
+                         dlPath, entry->d_name, (long)st.st_size);
+                httpd_resp_sendstr_chunk(req, buf);
+            }
+        }
+        closedir(dir);
+        httpd_resp_sendstr_chunk(req, "</ul>");
+    }
+
+    httpd_resp_sendstr_chunk(req, "</body></html>");
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+#pragma GCC diagnostic pop
+
+// GET /api/file?p=/logs/xxx.log  → 파일 다운로드
+static esp_err_t handleFileDownload(httpd_req_t *req)
+{
+    updateActivity();
+
+    // Query string에서 p= 파라미터 읽기
+    char qbuf[128] = {};
+    if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing query");
+        return ESP_FAIL;
+    }
+    char pval[100] = {};
+    if (httpd_query_key_value(qbuf, "p", pval, sizeof(pval)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing p param");
+        return ESP_FAIL;
+    }
+
+    // 경로 검증: /logs/ 또는 /laps/ 로 시작해야 함
+    if (strncmp(pval, "/logs/", 6) != 0 && strncmp(pval, "/laps/", 6) != 0) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Forbidden path");
+        return ESP_FAIL;
+    }
+
+    char fullPath[128];
+    snprintf(fullPath, sizeof(fullPath), "/sdcard%s", pval);
+
+    FILE* f = fopen(fullPath, "r");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/octet-stream");
+
+    // Content-Disposition: attachment; filename=xxx
+    const char* fname = strrchr(pval, '/');
+    fname = fname ? fname + 1 : pval;
+    char cdHeader[128];
+    snprintf(cdHeader, sizeof(cdHeader), "attachment; filename=\"%s\"", fname);
+    httpd_resp_set_hdr(req, "Content-Disposition", cdHeader);
+
+    static char fileBuf[2048];
+    size_t n;
+    while ((n = fread(fileBuf, 1, sizeof(fileBuf), f)) > 0) {
+        if (httpd_resp_send_chunk(req, fileBuf, (ssize_t)n) != ESP_OK) break;
+    }
+    fclose(f);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 // 404 -> 302 리다이렉트 / (캡티브 포털)
 static esp_err_t handleNotFound(httpd_req_t *req, httpd_err_code_t err)
 {
@@ -418,7 +569,7 @@ static esp_err_t handleCaptiveCheck(httpd_req_t *req)
 static void initHttpServer(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = ENABLE_LIVE_LOG_WS ? 12 : 11;
+    config.max_uri_handlers = ENABLE_LIVE_LOG_WS ? 14 : 13;
     config.max_open_sockets = 2;  // 3→2: save ~11KB internal RAM for WiFi DMA TX
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 4096;
@@ -579,6 +730,29 @@ static void initHttpServer(void)
         .supported_subprotocol = nullptr
     };
     httpd_register_uri_handler(s_httpServer, &uri_ota_status);
+
+    // SD 카드 파일 브라우저
+    httpd_uri_t uri_files = {
+        .uri = "/files",
+        .method = HTTP_GET,
+        .handler = handleFileList,
+        .user_ctx = nullptr,
+        .is_websocket = false,
+        .handle_ws_control_frames = false,
+        .supported_subprotocol = nullptr
+    };
+    httpd_register_uri_handler(s_httpServer, &uri_files);
+
+    httpd_uri_t uri_file_download = {
+        .uri = "/api/file",
+        .method = HTTP_GET,
+        .handler = handleFileDownload,
+        .user_ctx = nullptr,
+        .is_websocket = false,
+        .handle_ws_control_frames = false,
+        .supported_subprotocol = nullptr
+    };
+    httpd_register_uri_handler(s_httpServer, &uri_file_download);
 
     // 404 -> 리다이렉트 (나머지 모든 요청)
     httpd_register_err_handler(s_httpServer, HTTPD_404_NOT_FOUND, handleNotFound);
