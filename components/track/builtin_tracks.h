@@ -9,7 +9,7 @@
  * To add a new track:
  * 1. Define sectors (optional)
  * 2. Define layouts with finish lines
- * 3. Define the track with center coordinates
+ * 3. Define the track (id, name, country, layouts)
  * 4. Add to BUILTIN_TRACKS array
  */
 
@@ -88,8 +88,7 @@ static const TrackLayout LAYOUTS[] = {
             45.0f                   // validHeadingMax (allowing wrap around 0)
         },
         
-        // Timing expectations
-        52000,                      // expectedLapTimeMs (~52 seconds for fast lap)
+        // Lap time validation
         30000,                      // minLapTimeMs (30 seconds - anything faster is invalid)
         180000,                     // maxLapTimeMs (3 minutes - anything slower is invalid)
         
@@ -115,12 +114,7 @@ static const TrackDefinition TRACK = {
     "everland",                     // id
     "Everland Speedway",            // name
     "KR",                           // country
-    
-    // Center coordinates (from everland_track_data.h)
-    TRACK_CENTER_LAT,               // centerLat
-    TRACK_CENTER_LNG,               // centerLng
-    1200.0f,                        // detectionRadiusM (1.2km)
-    
+
     // Layouts
     LAYOUT_COUNT,                   // layoutCount
     LAYOUTS                         // layouts
@@ -222,8 +216,7 @@ static const TrackLayout LAYOUTS[] = {
             60.0f                   // validHeadingMax
         },
 
-        // Timing expectations (Inje Speedium: ~3.908km)
-        90000,                      // expectedLapTimeMs (~90 seconds)
+        // Lap time validation (Inje Speedium: ~3.908km)
         60000,                      // minLapTimeMs (1 minute)
         300000,                     // maxLapTimeMs (5 minutes)
 
@@ -249,11 +242,6 @@ static const TrackDefinition TRACK = {
     "inje",                         // id
     "Inje Speedium",                // name (인제스피디움)
     "KR",                           // country
-
-    // Center coordinates (centroid of all sector boundary points)
-    38.001293,                      // centerLat
-    128.290807,                     // centerLng
-    2500.0f,                        // detectionRadiusM (2.5km covers full 3.9km circuit)
 
     // Layouts
     LAYOUT_COUNT,                   // layoutCount

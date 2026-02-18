@@ -383,12 +383,6 @@ void handleSerialCommands(void) {
         return;
     }
 
-    // 시작 화면 중 아무 키 → dismiss
-    if (isStartupScreenActive()) {
-        dismissStartupScreen();
-        return;
-    }
-
     switch (cmd) {
         case 'e':
         case 'E':

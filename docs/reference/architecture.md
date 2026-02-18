@@ -1,6 +1,6 @@
 # GPS 랩 타이머 아키텍처
 
-**상태:** 2026-02-14 기준 최신
+**상태:** 2026-02-19 기준 최신
 **SSOT:** 시스템 아키텍처의 단일 정보원
 
 ## 1. 시스템 개요
@@ -10,7 +10,7 @@
 │                         부팅 시퀀스                           │
 ├─────────────────────────────────────────────────────────────┤
 │ 1. 시리얼 초기화 (USB 콘솔, VFS stdin/stdout)                │
-│ 2. SPIFFS 저장소 초기화                                      │
+│ 2. 저장소 초기화 (NVS + SPIFFS + SD 카드)                     │
 │ 3. 디스플레이 초기화 (AXS15231B + LVGL)                      │
 │ 4. GPS 초기화 (u-blox G10A-F33, UART2)                      │
 │ 5. 레퍼런스 랩 로드                                           │
@@ -48,8 +48,8 @@
 | `main.cpp` | 앱 진입점, 메인 루프, 전역 컨텍스트 (`gApp`) |
 | `waveshare_display.cpp/h` | 디스플레이 드라이버, LVGL 통합, UI 렌더링 |
 | `ublox_gps.cpp/h` | GPS 드라이버 (UBX 프로토콜, UART2) |
-| `finish_line.cpp/h` | 결승선 통과 감지 |
-| `lap_storage.cpp/h` | SPIFFS 기반 랩 데이터 영속성 |
+| `finish_line.cpp/h` | 결승선 통과 감지 (segment intersection + heading 검증) |
+| `lap_storage.cpp/h` | 랩 데이터 영속성 (SD 우선, SPIFFS 폴백) |
 | `serial_commands.cpp/h` | CLI 명령 핸들러 |
 
 ### 2.2 컴포넌트 (`components/`)
@@ -65,8 +65,8 @@
 | 파일 | 목적 |
 |------|---------|
 | `track_types.h` | 트랙/레이아웃/섹터 데이터 구조 (`FinishLineDefinition`, `SectorBoundary` 등) |
-| `builtin_tracks.h` | 에버랜드 트랙 데이터 (3 섹터, 결승선, 경계) — 섹터 좌표 SSOT |
-| `track_manager.cpp/h` | 트랙 감지 및 선택 |
+| `builtin_tracks.h` | 빌트인 트랙 데이터 (에버랜드, 인제) — SD JSON으로 오버라이드 가능 |
+| `track_manager.cpp/h` | 트랙 선택 및 피니시라인 기반 자동 식별 |
 
 #### Timing (`components/timing/`)
 | 파일 | 목적 |
@@ -234,7 +234,7 @@ LVGL 렌더 → RGB565 버퍼
 
 ## 7. 주요 알고리즘
 
-### 7.1 결승선 감지
+### 7.1 결승선 감지 + 트랙 자동 식별
 **방법:** 선 세그먼트 교차
 **파일:** `main/finish_line.cpp`
 
@@ -248,6 +248,18 @@ if segmentsIntersect(AB, prev→curr):
   AND 데드 존 외부 (distance > DEAD_ZONE_M):
     → 랩 완료!
 ```
+
+**세션 상태머신 (2단계):**
+```
+PRE_TRACK → (속도 조건 + 피니시라인 정방향 통과) → SESSION_ACTIVE
+```
+- PRE_TRACK에서 모든 등록 트랙(빌트인 + SD JSON)의 피니시라인을 매 GPS 업데이트마다 체크
+- 통과한 피니시라인으로 어떤 트랙인지 자동 식별 (별도 proximity 감지 없음)
+- 속도 조건(`SESSION_START_MIN_SPEED_KMH`) 유지
+
+**트랙 정의 우선순위:**
+1. SD 카드 JSON (`/sdcard/tracks/<id>.json`) — 있으면 우선
+2. 빌트인 (`builtin_tracks.h`) — SD 없거나 해당 트랙 JSON 없을 때 폴백
 
 ### 7.2 델타 스무딩
 **방법:** 지수 이동 평균 (EMA)

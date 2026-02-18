@@ -7,11 +7,8 @@
 #include "finish_line.h"
 #include "track_types.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <errno.h>
-#include <sys/stat.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -29,10 +26,6 @@ static const char *TAG = "FINISH_LINE";
 
 constexpr float DEG_TO_RAD_F = M_PI / 180.0f;
 constexpr float EARTH_RADIUS_M = 6371000.0f;
-constexpr char FINISH_LINE_DIR[] = "/spiffs/config";
-constexpr char FINISH_LINE_FILE[] = "/spiffs/config/finish_line.bin";
-constexpr char LEGACY_FINISH_LINE_DIR[] = "/config";
-constexpr char LEGACY_FINISH_LINE_FILE[] = "/config/finish_line.bin";
 
 // ============================================================
 // Global State
@@ -44,37 +37,6 @@ static CrossingState s_crossingState = {};
 // ============================================================
 // Helper Functions
 // ============================================================
-
-static bool fileExists(const char* path) {
-    struct stat st = {};
-    return stat(path, &st) == 0;
-}
-
-static bool ensureDirectory(const char* path) {
-    struct stat st = {};
-    if (stat(path, &st) == 0) {
-        return S_ISDIR(st.st_mode);
-    }
-    if (mkdir(path, 0755) == 0) {
-        return true;
-    }
-    if (errno == ENOTSUP) {
-        return true;
-    }
-    ESP_LOGE(TAG, "mkdir failed for %s (errno=%d)", path, errno);
-    return false;
-}
-
-static void migrateLegacyFinishLine() {
-    if (!fileExists(LEGACY_FINISH_LINE_FILE)) {
-        return;
-    }
-
-    ensureDirectory(FINISH_LINE_DIR);
-    if (rename(LEGACY_FINISH_LINE_FILE, FINISH_LINE_FILE) == 0) {
-        ESP_LOGI(TAG, "Finish line config migrated to /spiffs");
-    }
-}
 
 // segmentsIntersect() is provided by geo_utils.h
 
@@ -109,10 +71,6 @@ static bool isBearingValid(float heading, uint16_t minBearing, uint16_t maxBeari
 void initFinishLine() {
     s_finishLine = {};
     s_crossingState = {};
-
-    ensureDirectory(FINISH_LINE_DIR);
-    migrateLegacyFinishLine();
-    loadFinishLineFromStorage();
 }
 
 bool setFinishLineFromCurrentPos(double lat, double lng, float heading) {
@@ -141,50 +99,12 @@ bool setFinishLineFromCurrentPos(double lat, double lng, float heading) {
 
     ESP_LOGI(TAG, "Finish line set at %.6f,%.6f heading %.0f", lat, lng, heading);
 
-    return saveFinishLineToStorage();
-}
-
-bool loadFinishLineFromStorage() {
-    if (!fileExists(FINISH_LINE_FILE)) {
-        return false;
-    }
-
-    FILE* f = fopen(FINISH_LINE_FILE, "rb");
-    if (!f) {
-        return false;
-    }
-
-    size_t read = fread(&s_finishLine, 1, sizeof(FinishLine), f);
-    fclose(f);
-
-    if (read != sizeof(FinishLine)) {
-        s_finishLine = {};
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Finish line loaded from storage");
-    return s_finishLine.configured;
-}
-
-bool saveFinishLineToStorage() {
-    ensureDirectory(FINISH_LINE_DIR);
-
-    FILE* f = fopen(FINISH_LINE_FILE, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to save finish line");
-        return false;
-    }
-
-    size_t written = fwrite(&s_finishLine, 1, sizeof(FinishLine), f);
-    fclose(f);
-
-    return written == sizeof(FinishLine);
+    return true;
 }
 
 void clearFinishLine() {
     s_finishLine = {};
     resetCrossingState();
-    remove(FINISH_LINE_FILE);
     ESP_LOGI(TAG, "Finish line cleared");
 }
 

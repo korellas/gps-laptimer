@@ -1,10 +1,13 @@
 idf_component_register(
     SRCS
-        "track_manager.cpp"
+        "axis_calibrator.cpp"
+        "speed_kalman.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
-        log
         esp_timer
+        log
         common
+        json
+        spiffs
 )

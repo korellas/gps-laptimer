@@ -1,6 +1,6 @@
 # 기능 백로그
 
-**최종 업데이트:** 2026-02-14
+**최종 업데이트:** 2026-02-19
 
 이 문서는 모든 기능 아이디어를 **구현 필요성** 기준으로 정리합니다.
 각 아이디어는 로드맵의 Phase에 배치되어 있습니다.
@@ -20,32 +20,68 @@
 
 ## Phase 2 기능 (다중 트랙 + 실전 대비)
 
-### 다중 트랙 지원
-**상태:** 📋 계획됨 (Phase 2.1-2.2)
+### 트랙 정의 JSON + 빌트인 폴백
+**상태:** 📋 계획됨 (Phase 2.1)
 **필요성:** 필수
-**작업량:** 대 (3-4주)
+**작업량:** 중 (2주)
 
-에버랜드만으론 제품 가치가 없음. 트랙을 바꿀 때마다 펌웨어를 수정할 수는 없다.
+트랙을 바꿀 때마다 펌웨어를 수정할 수 없다. SD 카드에 JSON 파일로 트랙 추가/수정 가능해야 한다.
 
 **요구사항:**
-- CSV 기반 트랙 템플릿 형식
-- 내장 트랙: 에버랜드, 용인, 인제, 태백, 영암
-- GPS 기반 자동 감지 (중심점까지 haversine 거리)
-- 시리얼/UI를 통한 수동 트랙 선택
-- 트랙별 레퍼런스 랩
+- SD 카드 JSON 트랙 파일 (`/sdcard/tracks/<id>.json`)
+- 빌트인 트랙 (에버랜드, 인제) 펌웨어 디폴트로 유지
+- SD JSON이 있으면 빌트인 오버라이드
+- 트랙 중심 좌표 = 피니시라인 A/B 중앙 (자동 계산)
+- `expectedLapTimeMs`, `detectionRadiusM` 제거 (dead code / proximity 폐지)
 
-**참조:** [roadmap.md](roadmap.md) Phase 2.1-2.2
+**참조:** [roadmap.md](roadmap.md) Phase 2.1, [specs/storage-settings-refactor.md](specs/storage-settings-refactor.md)
+
+---
+
+### 세션 상태머신 단순화 + 트랙 자동 식별
+**상태:** 📋 계획됨 (Phase 2.2)
+**필요성:** 필수
+**작업량:** 중 (1주)
+
+proximity detection (bbox + haversine)은 불필요한 오버헤드. 피니시라인 정방향 통과 자체가 트랙 검증이다.
+
+**요구사항:**
+- NEAR_TRACK 상태 제거 → `PRE_TRACK → SESSION_ACTIVE` 2단계
+- PRE_TRACK에서 모든 트랙의 피니시라인을 직접 체크 (비용 0)
+- 피니시라인 통과한 트랙으로 자동 식별
+- proximity 관련 코드/상수 전면 제거
+- 속도 조건(`SESSION_START_MIN_SPEED_KMH`) 유지
+
+**참조:** [roadmap.md](roadmap.md) Phase 2.2, [specs/storage-settings-refactor.md](specs/storage-settings-refactor.md)
+
+---
+
+### 저장소/설정 리팩토링
+**상태:** 📋 계획됨 (Phase 2.3)
+**필요성:** 필수
+**작업량:** 소 (1주)
+
+설정이 여러 파일/포맷에 흩어져 있고, finish_line.bin은 dead path. 통합 필요.
+
+**요구사항:**
+- `/spiffs/config/finish_line.bin` 삭제
+- `settings.json` 확장: `deltaRef` (오늘 베스트/세션 베스트), `customFinishLine`
+- `/spiffs/config/imu_fusion.json` 변경 없음 (내부 전용)
+- 수동 피니시라인 설정 시 settings.json에 저장 (바이너리 → JSON)
+
+**참조:** [roadmap.md](roadmap.md) Phase 2.3, [specs/storage-settings-refactor.md](specs/storage-settings-refactor.md)
 
 ---
 
 ### 레퍼런스 랩 관리
-**상태:** 📋 계획됨 (Phase 2.3)
+**상태:** 📋 계획됨 (Phase 2.4)
 **필요성:** 높음
 **작업량:** 중 (1-2주)
 
 트랙당 빠름/중간/느림 레퍼런스 랩 관리. 사용자 선택 가능.
+델타 비교 기준: 오늘 베스트(기본) / 세션 베스트 — settings.json의 `deltaRef` 필드로 설정.
 
-**참조:** [roadmap.md](roadmap.md) Phase 2.3
+**참조:** [roadmap.md](roadmap.md) Phase 2.4
 
 ---
 
@@ -63,7 +99,7 @@ GPS fix 상태를 모르면 쓸모없는 데이터를 수집하게 된다. 트�
 - 초기화 완료 시 자동 전환
 - 초기화 실패 시 오류 표시
 
-**참조:** [roadmap.md](roadmap.md) Phase 2.4
+**참조:** [roadmap.md](roadmap.md) Phase 2.5
 
 ---
 
@@ -129,12 +165,12 @@ GPS fix 상태를 모르면 쓸모없는 데이터를 수집하게 된다. 트�
 **캡티브 포털 연동 (Phase 4.2 이후):**
 - 웹 UI에서 방전 그래프 확인 가능
 
-**참조:** [roadmap.md](roadmap.md) Phase 2.5
+**참조:** [roadmap.md](roadmap.md) Phase 2.6
 
 ---
 
 ### GPS 테스트 페이지
-**상태:** 📋 계획됨 (Phase 2.7)
+**상태:** 📋 계획됨 (Phase 2.8)
 **필요성:** 필수
 **작업량:** 소 (2-3일)
 
@@ -183,12 +219,12 @@ GPS 하드웨어 연결 후 설정이 제대로 적용됐는지 현장에서 즉
 **의존성:**
 - UBX 초기화 구현 (보드레이트 변경, 네비 레이트 설정)
 
-**참조:** [roadmap.md](roadmap.md) Phase 2.7
+**참조:** [roadmap.md](roadmap.md) Phase 2.8
 
 ---
 
 ### GPS 구현 문서화
-**상태:** 📋 계획됨 (Phase 2.6)
+**상태:** 📋 계획됨 (Phase 2.7)
 **필요성:** 높음
 **작업량:** 소 (2-3일)
 
@@ -203,11 +239,43 @@ GPS 문제 발생 시 디버깅에 필수. 현장에서 트러블슈팅 참고�
 - `docs/reference/gps-implementation.md`
 - `docs/guides/gps-troubleshooting.md`
 
-**참조:** [roadmap.md](roadmap.md) Phase 2.6
+**참조:** [roadmap.md](roadmap.md) Phase 2.7
 
 ---
 
 ## Phase 3 기능 (UI/UX 향상)
+
+### Speed Mode (가속 측정 모드) 🆕
+**상태:** 📋 계획됨 (Phase 3.6)
+**필요성:** 높음
+**작업량:** 중 (2주)
+
+랩타이머와 별도로, **직선 가속 성능을 GPS 기반으로 측정**하는 모드. 서킷이 아닌 일반 도로/활주로에서도 사용 가능하며, 차량 튜닝 전후 성능 비교에 유용하다.
+
+**측정 모드:**
+- **0→100 km/h**: 가장 기본적인 가속 측정
+- **0→200 km/h**: 고성능 차량용
+- **0→60 km/h**: 시내 주행 체감 가속력
+- **100→200 km/h**: 롤링 가속 (고속 성능)
+- **커스텀**: 사용자가 시작/종료 속도 직접 설정
+
+**핵심 기능:**
+- GPS 10Hz 보간으로 ±50ms 정확도의 시작/종료 시점 계산
+- 중간 구간 자동 기록 (0→60, 0→80 등)
+- 실시간 속도 프로그레스 바 + 경과 시간 표시
+- 히스토리 관리 + 베스트 기록 추적
+- HDOP < 2.0 조건에서만 측정 허용 (GPS 품질 보장)
+
+**상태 머신:** `IDLE → READY → MEASURING → RESULT → IDLE`
+
+**의존성:**
+- GPS 하드웨어 모드 (Phase 0 ✅)
+- 시작 화면 모드 선택 (Phase 2.4 ✅)
+- 터치 UI (Phase 3.1) — 모드 선택, 설정 변경
+
+**상세 설계:** [specs/speed-mode.md](specs/speed-mode.md)
+
+---
 
 ### 터치 UI 설정 메뉴
 **상태:** 📋 계획됨 (Phase 3.1)
@@ -221,7 +289,7 @@ GPS 문제 발생 시 디버깅에 필수. 현장에서 트러블슈팅 참고�
 - 레퍼런스 랩 선택
 - 디스플레이 밝기 슬라이더
 - GPS/시뮬레이션 모드 토글
-- SPIFFS 설정 영속성
+- 통합 settings.json 영속성
 
 **의존성:**
 - 다중 트랙 지원 (Phase 2)
@@ -360,22 +428,16 @@ GPS 문제 발생 시 디버깅에 필수. 현장에서 트러블슈팅 참고�
 ## Phase 4 기능 (데이터 및 연결성)
 
 ### SD 카드 데이터 영속성
-**상태:** 📋 계획됨 (Phase 4.1)
+**상태:** ✅ 부분 구현 (Phase 4.1)
 **필요성:** 높음
-**작업량:** 중 (2주)
 
-SPIFFS 용량 한계로 장기 사용 불가. 수십 랩이면 꽉 참.
+**구현 완료:**
+- ✅ SD 카드 마운트 + `lap_storage.cpp`에서 SD/SPIFFS 분기
+- ✅ `sd_logger.cpp`에서 GPS/세션 CSV 로깅
 
-**기능:**
-- ESP-IDF SD/MMC 드라이버 (SPI 모드)
-- 파일 구조: `/tracks/`, `/laps/`, `/sessions/`, `/references/`
-- 트랙 설정 CSV + 랩 데이터 바이너리
-- SD 카드 없을 시 SPIFFS 폴백
-- 세션 히스토리 및 재생
-
-**선행 조사:**
-- 보드에 SD 카드 슬롯이 있는지 확인
-- SPI 핀 할당
+**잔여 작업:**
+- 📋 settings.json SD 우선 저장 (SPIFFS 폴백)
+- 📋 트랙 JSON SD 로더 → Phase 2.1로 앞당겨짐
 
 **참조:** [roadmap.md](roadmap.md) Phase 4.1
 
@@ -398,20 +460,20 @@ SPIFFS 용량 한계로 장기 사용 불가. 수십 랩이면 꽉 참.
 
 ---
 
-### 트랙/섹터 설정 웹 인터페이스
+### 트랙/설정 웹 인터페이스
 **상태:** 📋 계획됨 (Phase 4.3)
 **필요성:** 중간
 **작업량:** 중 (2-3주)
 
-새 트랙 추가 시 펌웨어 수정 없이 설정 가능.
+새 트랙 추가 시 펌웨어 수정 없이 SD에 JSON 파일만 추가. 설정도 웹에서 통합 관리.
 
 **기능:**
 - ESP-IDF HTTP 서버 + 임베디드 프론트엔드
-- 트랙 CSV 업로드/다운로드
-- 트랙 파라미터 편집 (결승선, 섹터, 경계)
+- 트랙 JSON 업로드/다운로드/편집
+- 통합 설정 편집 (settings.json: 전화번호, 델타 기준 등)
 - 변경사항 검증 및 미리보기
 
-**의존:** WiFi (Phase 4.2) + 다중 트랙 (Phase 2)
+**의존:** WiFi (Phase 4.2) + 트랙 JSON 포맷 (Phase 2.1)
 
 **참조:** [roadmap.md](roadmap.md) Phase 4.3
 
@@ -458,6 +520,33 @@ SPIFFS 용량 한계로 장기 사용 불가. 수십 랩이면 꽉 참.
 
 **참조:** [roadmap.md](roadmap.md) Phase 4.4
 **참고:** [ESP Web Tools](https://esphome.github.io/esp-web-tools/), [espressif/esp-idf-ci-action](https://github.com/espressif/esp-idf-ci-action)
+
+---
+
+### User Track Creation (사용자 트랙 생성) 🆕
+**상태:** 📋 계획됨 (Phase 4.7)
+**필요성:** 높음
+**작업량:** 대 (3-4주)
+
+사용자가 **직접 트랙을 정의**하여, 내장 트랙에 없는 장소에서도 랩타임 측정 가능. Phase 2.1의 트랙 JSON 포맷과 동일한 형식으로 저장.
+
+**트랙 타입:**
+- **서킷 (Circuit):** 시작점 = 결승선, 순환 코스
+- **원웨이 (One-Way):** 시작선 ≠ 끝선, 힐클라임/드래그/고갯길 구간 측정
+
+**트랙 생성 방법 (3가지):**
+1. **GPS 현장 캡처**: 디바이스에서 현재 위치로 시작/끝점 캡처, heading 자동 설정
+2. **WiFi 웹 UI**: 브라우저에서 좌표 입력 또는 지도 클릭으로 설정
+3. **JSON 파일 업로드**: SD에 직접 트랙 JSON 파일 추가
+
+**저장:** `/sdcard/tracks/<user_track_id>.json` — 빌트인과 동일 파이프라인, 피니시라인 통과 기반 자동 식별에 자연스럽게 통합
+
+**의존성:**
+- 트랙 JSON 포맷 (Phase 2.1)
+- WiFi 웹 서버 (Phase 4.2)
+- 트랙 설정 웹 인터페이스 (Phase 4.3)
+
+**상세 설계:** [specs/user-track-creation.md](specs/user-track-creation.md)
 
 ---
 
@@ -643,5 +732,5 @@ ESP32에서 직접 비디오 처리 불가. CSV 내보내기(Phase 4)가 완료�
 
 ---
 
-**최종 검토:** 2026-02-14
+**최종 검토:** 2026-02-18
 **다음 검토:** 월별

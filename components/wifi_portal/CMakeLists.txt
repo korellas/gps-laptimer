@@ -12,7 +12,6 @@ idf_component_register(
         nvs_flash
         spiffs
         json
-        dns_server
         common
         ota
         sdcard

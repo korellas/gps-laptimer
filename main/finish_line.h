@@ -56,8 +56,6 @@ void initFinishLine();
 
 // Configuration
 bool setFinishLineFromCurrentPos(double lat, double lng, float heading);
-bool loadFinishLineFromStorage();
-bool saveFinishLineToStorage();
 void clearFinishLine();
 
 // Detection

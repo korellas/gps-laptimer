@@ -27,6 +27,7 @@
 #include "freertos/task.h"
 
 #include <cmath>
+#include <algorithm>
 
 static const char* TAG = "IMU";
 
@@ -236,14 +237,34 @@ bool imuIsReady(void)
     return s_imu_dev != nullptr;
 }
 
+// nth_element 기반 메디안 (outlier에 강건)
+static float medianOf(float* arr, int n)
+{
+    std::nth_element(arr, arr + n / 2, arr + n);
+    return arr[n / 2];
+}
+
 bool imuCalibrate(int numSamples)
 {
     if (!s_imu_dev || numSamples < 10) return false;
 
-    ESP_LOGI(TAG, "Calibrating (%d samples)...", numSamples);
+    ESP_LOGI(TAG, "Calibrating (%d samples, median)...", numSamples);
 
-    float sumAx = 0, sumAy = 0, sumAz = 0;
-    float sumGx = 0, sumGy = 0, sumGz = 0;
+    // 스택이 부족할 수 있으므로 힙 할당 (6축 × numSamples × 4bytes)
+    float* bufAx = (float*)malloc(numSamples * sizeof(float));
+    float* bufAy = (float*)malloc(numSamples * sizeof(float));
+    float* bufAz = (float*)malloc(numSamples * sizeof(float));
+    float* bufGx = (float*)malloc(numSamples * sizeof(float));
+    float* bufGy = (float*)malloc(numSamples * sizeof(float));
+    float* bufGz = (float*)malloc(numSamples * sizeof(float));
+
+    if (!bufAx || !bufAy || !bufAz || !bufGx || !bufGy || !bufGz) {
+        ESP_LOGE(TAG, "Calibration malloc failed");
+        free(bufAx); free(bufAy); free(bufAz);
+        free(bufGx); free(bufGy); free(bufGz);
+        return false;
+    }
+
     int validCount = 0;
 
     // 캘리브레이션 중 오프셋 적용 비활성화
@@ -252,13 +273,13 @@ bool imuCalibrate(int numSamples)
 
     for (int i = 0; i < numSamples; i++) {
         ImuData sample;
-        if (imuRead(&sample)) {
-            sumAx += sample.rawAccelX;
-            sumAy += sample.rawAccelY;
-            sumAz += sample.rawAccelZ;
-            sumGx += sample.gyroX;
-            sumGy += sample.gyroY;
-            sumGz += sample.gyroZ;
+        if (imuRead(&sample) && validCount < numSamples) {
+            bufAx[validCount] = sample.rawAccelX;
+            bufAy[validCount] = sample.rawAccelY;
+            bufAz[validCount] = sample.rawAccelZ;
+            bufGx[validCount] = sample.gyroX;
+            bufGy[validCount] = sample.gyroY;
+            bufGz[validCount] = sample.gyroZ;
             validCount++;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -268,35 +289,37 @@ bool imuCalibrate(int numSamples)
 
     if (validCount < numSamples / 2) {
         ESP_LOGE(TAG, "Calibration failed: only %d/%d valid", validCount, numSamples);
+        free(bufAx); free(bufAy); free(bufAz);
+        free(bufGx); free(bufGy); free(bufGz);
         return false;
     }
 
-    float n = (float)validCount;
-    s_calibration.accelOffsetX = sumAx / n;
-    s_calibration.accelOffsetY = sumAy / n;
-    // Z축: 중력(~1g) 보정 — 정지 상태에서 Z ≈ 1.0g
-    // 가장 큰 절대값을 가진 축을 중력축으로 판별
-    float avgAx = sumAx / n;
-    float avgAy = sumAy / n;
-    float avgAz = sumAz / n;
-    float absX = fabsf(avgAx), absY = fabsf(avgAy), absZ = fabsf(avgAz);
+    // 메디안 계산 (nth_element는 배열을 부분 정렬함)
+    float medAx = medianOf(bufAx, validCount);
+    float medAy = medianOf(bufAy, validCount);
+    float medAz = medianOf(bufAz, validCount);
+
+    s_calibration.accelOffsetX = medAx;
+    s_calibration.accelOffsetY = medAy;
+    s_calibration.accelOffsetZ = medAz;
+
+    // 가장 큰 절대값을 가진 축을 중력축으로 판별 → 1g 보정
+    float absX = fabsf(medAx), absY = fabsf(medAy), absZ = fabsf(medAz);
 
     if (absZ >= absX && absZ >= absY) {
-        // Z축이 중력축
-        s_calibration.accelOffsetZ = avgAz - (avgAz > 0 ? 1.0f : -1.0f);
+        s_calibration.accelOffsetZ = medAz - (medAz > 0 ? 1.0f : -1.0f);
     } else if (absY >= absX && absY >= absZ) {
-        // Y축이 중력축
-        s_calibration.accelOffsetY = avgAy - (avgAy > 0 ? 1.0f : -1.0f);
-        s_calibration.accelOffsetZ = avgAz;
+        s_calibration.accelOffsetY = medAy - (medAy > 0 ? 1.0f : -1.0f);
     } else {
-        // X축이 중력축
-        s_calibration.accelOffsetX = avgAx - (avgAx > 0 ? 1.0f : -1.0f);
-        s_calibration.accelOffsetZ = avgAz;
+        s_calibration.accelOffsetX = medAx - (medAx > 0 ? 1.0f : -1.0f);
     }
 
-    s_calibration.gyroOffsetX = sumGx / n;
-    s_calibration.gyroOffsetY = sumGy / n;
-    s_calibration.gyroOffsetZ = sumGz / n;
+    s_calibration.gyroOffsetX = medianOf(bufGx, validCount);
+    s_calibration.gyroOffsetY = medianOf(bufGy, validCount);
+    s_calibration.gyroOffsetZ = medianOf(bufGz, validCount);
+
+    free(bufAx); free(bufAy); free(bufAz);
+    free(bufGx); free(bufGy); free(bufGz);
 
     s_calibration.calibrated = true;
     s_calibration.samplesUsed = validCount;

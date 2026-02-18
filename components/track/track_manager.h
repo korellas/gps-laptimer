@@ -1,10 +1,10 @@
 /**
  * @file track_manager.h
- * @brief Track detection and selection management
- * @version 1.0
- * 
- * Manages track auto-detection based on GPS position and allows
- * manual selection of tracks and layouts.
+ * @brief Track selection and active track management
+ * @version 2.0
+ *
+ * Manages active track/layout state. Track identification is done by
+ * finish line crossing in gps_processor.cpp (PRE_TRACK state).
  */
 
 #ifndef TRACK_MANAGER_H
@@ -31,41 +31,6 @@ void initTrackManager();
  * Clears current track selection and detection state.
  */
 void resetTrackManager();
-
-// ============================================================
-// TRACK DETECTION
-// ============================================================
-
-/**
- * @brief Attempt to detect track based on GPS position
- * 
- * Searches built-in tracks to find one whose center is within
- * detection radius of the given position.
- * 
- * @param lat Current latitude
- * @param lng Current longitude
- * @return Pointer to detected track, or nullptr if none found
- */
-const TrackDefinition* detectTrackByPosition(double lat, double lng);
-
-/**
- * @brief Check if we're still within the active track's area
- * 
- * @param lat Current latitude
- * @param lng Current longitude
- * @return true if still within track detection radius
- */
-bool isWithinActiveTrack(double lat, double lng);
-
-/**
- * @brief Get distance to nearest known track
- * 
- * @param lat Current latitude
- * @param lng Current longitude
- * @param outTrack Output: nearest track (can be nullptr)
- * @return Distance in meters to nearest track center
- */
-float getDistanceToNearestTrack(double lat, double lng, const TrackDefinition** outTrack);
 
 // ============================================================
 // ACTIVE TRACK MANAGEMENT
@@ -179,14 +144,14 @@ int getActiveLayoutIndex();
  * 
  * @return Pointer to finish line, or nullptr if no track active
  */
-const FinishLineDefinition* getActiveFinishLine();
+const FinishLineDefinition* getActiveFinishLineDefinition();
 
 /**
  * @brief Check if finish line is configured
  * 
  * @return true if finish line is available
  */
-bool hasActiveFinishLine();
+bool hasActiveFinishLineDefinition();
 
 // ============================================================
 // SECTOR ACCESS
@@ -236,34 +201,32 @@ bool hasBuiltinReference();
 bool getBuiltinReferenceInfo(int& outStartIdx, int& outEndIdx, uint32_t& outTimeMs);
 
 // ============================================================
-// PROXIMITY DETECTION (with hysteresis)
+// TRACK/LAYOUT ID ACCESS (for lap storage)
 // ============================================================
 
 /**
- * @brief Update track proximity state using 2-stage detection + hysteresis
- *
- * Stage 1: Bounding box pre-filter (no trig, very cheap)
- * Stage 2: Haversine distance (only when Stage 1 passes)
- * Hysteresis: enter at 1× detectionRadiusM, exit at 1.5× detectionRadiusM
- *
- * Also auto-sets active track when proximity is first detected.
- *
- * @param lat Current latitude
- * @param lng Current longitude
- * @return true if within proximity zone of any track
+ * @brief Get active track's index in BUILTIN_TRACKS[]
+ * @return Index (0-based), or 0xFF if no active track
  */
-bool updateTrackProximity(double lat, double lng);
+uint8_t getActiveTrackIndex();
 
 /**
- * @brief Check if currently near any track (cached from last updateTrackProximity)
- * @return true if within proximity zone
+ * @brief Get active layout index within the track
+ * @return Index (0-based), or 0xFF if no active track
  */
-bool isNearAnyTrack();
+uint8_t getActiveTrackLayoutIndex();
 
 /**
- * @brief Get name of the track currently in proximity (or nullptr)
+ * @brief Get active track's string ID (e.g., "everland")
+ * @return Track ID, or nullptr if no active track
  */
-const char* getNearTrackName();
+const char* getActiveTrackId();
+
+/**
+ * @brief Get active layout's string ID (e.g., "full")
+ * @return Layout ID, or nullptr if no active track/layout
+ */
+const char* getActiveLayoutId();
 
 // ============================================================
 // TRACK LISTING

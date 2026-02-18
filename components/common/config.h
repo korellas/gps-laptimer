@@ -36,6 +36,11 @@ constexpr int GPS_ENABLE_PIN = 0;   // GPIO0 - 모듈 ENABLE/EXTINT (노랑)
 constexpr int PWR_BUTTON_PIN = 16;  // GPIO16 - PWR button (active low)
 constexpr unsigned long POWER_OFF_HOLD_MS = 2000;  // 2초 길게 누르면 전원 오프
 
+// Sleep / Auto-power-off (IDLE_SLEEP 페이지에서만 적용)
+constexpr unsigned long SCREEN_OFF_TIMEOUT_MS    = 5UL * 60 * 1000;   // 5분 유휴 → 백라이트 OFF
+constexpr unsigned long AUTO_POWEROFF_TIMEOUT_MS = 30UL * 60 * 1000;  // 30분 유휴 → 자동 전원 오프
+constexpr float MOVEMENT_WAKE_SPEED_KMH          = 5.0f;              // 이 속도 이상 → 활동으로 간주
+
 // Battery ADC (GPIO4 = ADC1_CHANNEL_3, 전압 분배기 3:1)
 constexpr float BATTERY_DIVIDER_FACTOR = 3.0f;
 constexpr unsigned long BATTERY_READ_INTERVAL_MS = 60000;  // 60초마다 측정
@@ -126,24 +131,6 @@ constexpr float MIN_DEAD_RECKONING_SPEED_KMH = 10.0f;
 
 // Default satellite count to display in simulation mode
 constexpr uint8_t SIM_SATELLITE_COUNT = 10;
-
-// ============================================================
-// TRACK DETECTION
-// ============================================================
-
-// How often to check for track detection when not on a track (ms)
-constexpr unsigned long TRACK_DETECTION_INTERVAL_MS = 1000;
-
-// Minimum GPS samples before attempting track detection
-constexpr int MIN_SAMPLES_FOR_TRACK_DETECTION = 5;
-
-// Hysteresis factor for proximity exit: must move to detectionRadiusM × factor
-// to leave "near track" state (prevents flickering at boundary)
-constexpr float TRACK_PROXIMITY_HYSTERESIS_FACTOR = 1.5f;
-
-// Approximate meters per degree of latitude (used for bounding box pre-filter)
-// 1° lat ≈ 111.32 km at all latitudes
-constexpr double METERS_PER_DEG_LAT = 111320.0;
 
 // ============================================================
 // SESSION START CONDITIONS

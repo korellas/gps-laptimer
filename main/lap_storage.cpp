@@ -1,7 +1,7 @@
 /**
  * @file lap_storage.cpp
  * @brief Lap data storage implementation using SPIFFS (ESP-IDF)
- * @version 1.0
+ * @version 2.0
  */
 
 #include "lap_storage.h"
@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -35,9 +36,15 @@ static const char* getLapsDir() {
     return sdcardIsMounted() ? SD_LAPS_DIR : SPIFFS_LAPS_DIR;
 }
 
-static const char* getBestLapPath() {
+static const char* getLegacyBestLapPath() {
     static char buf[64];
     snprintf(buf, sizeof(buf), "%s/best.bin", getLapsDir());
+    return buf;
+}
+
+static const char* getBestLapPathForTrack(const char* trackId, const char* layoutId) {
+    static char buf[128];
+    snprintf(buf, sizeof(buf), "%s/best_%s_%s.bin", getLapsDir(), trackId, layoutId);
     return buf;
 }
 
@@ -52,6 +59,8 @@ static struct {
     uint32_t startTimestamp;
     float maxSpeedKmh;
     float totalSpeed;
+    uint8_t trackIndex;
+    uint8_t layoutIndex;
     bool active;
 } s_recording = {};
 
@@ -94,7 +103,7 @@ static bool ensureDirectory(const char* path) {
 }
 
 static void migrateLegacyLaps() {
-    const char* bestPath = getBestLapPath();
+    const char* bestPath = getLegacyBestLapPath();
     if (fileExists(LEGACY_BEST_LAP_FILE) && !fileExists(bestPath)) {
         ensureDirectory(getLapsDir());
         if (rename(LEGACY_BEST_LAP_FILE, bestPath) == 0) {
@@ -185,7 +194,7 @@ bool saveLap(const StorableLap& lap) {
 
     LapHeader header = {};
     header.magic = LAP_FILE_MAGIC;
-    header.version = 1;
+    header.version = 2;
     header.pointCount = lap.points.size();
     header.totalTimeMs = lap.totalTimeMs;
     header.startTimestamp = lap.startTimestamp;
@@ -193,6 +202,8 @@ bool saveLap(const StorableLap& lap) {
     header.avgSpeedX10 = (uint16_t)(lap.avgSpeedKmh * 10);
     header.sessionId = lap.sessionId;
     header.lapId = lap.lapId;
+    header.trackIndex = lap.trackIndex;
+    header.layoutIndex = lap.layoutIndex;
 
     size_t written = fwrite(&header, 1, sizeof(LapHeader), f);
     if (written != sizeof(LapHeader)) {
@@ -209,9 +220,9 @@ bool saveLap(const StorableLap& lap) {
         return false;
     }
 
-    ESP_LOGI(TAG, "Saved lap S%u L%u: %u pts, %.2fs",
+    ESP_LOGI(TAG, "Saved lap S%u L%u: %u pts, %.2fs (track=%u layout=%u)",
            lap.sessionId, lap.lapId, (unsigned int)lap.points.size(),
-           lap.totalTimeMs / 1000.0f);
+           lap.totalTimeMs / 1000.0f, header.trackIndex, header.layoutIndex);
     return true;
 }
 
@@ -250,6 +261,13 @@ bool loadLap(StorableLap& lap, uint16_t sessionId, uint16_t lapId) {
     lap.avgSpeedKmh = header.avgSpeedX10 / 10.0f;
     lap.sessionId = header.sessionId;
     lap.lapId = header.lapId;
+    if (header.version >= 2) {
+        lap.trackIndex = header.trackIndex;
+        lap.layoutIndex = header.layoutIndex;
+    } else {
+        lap.trackIndex = 0xFF;
+        lap.layoutIndex = 0xFF;
+    }
 
     return true;
 }
@@ -264,68 +282,29 @@ bool deleteLap(uint16_t sessionId, uint16_t lapId) {
 // Best Lap Operations
 // ============================================================
 
-bool saveBestLap(const StorableLap& lap) {
-    if (lap.points.empty()) {
+// Helper: load a best lap from a specific file path
+static bool loadBestLapFromFile(StorableLap& lap, const char* path) {
+    if (!fileExists(path)) {
         return false;
     }
 
-    FILE* f = fopen(getBestLapPath(), "wb");
-    if (!f) {
-        return false;
-    }
-
-    LapHeader header = {};
-    header.magic = LAP_FILE_MAGIC;
-    header.version = 1;
-    header.pointCount = lap.points.size();
-    header.totalTimeMs = lap.totalTimeMs;
-    header.startTimestamp = lap.startTimestamp;
-    header.maxSpeedX10 = (uint16_t)(lap.maxSpeedKmh * 10);
-    header.avgSpeedX10 = (uint16_t)(lap.avgSpeedKmh * 10);
-    header.sessionId = lap.sessionId;
-    header.lapId = lap.lapId;
-
-    size_t written = fwrite(&header, 1, sizeof(LapHeader), f);
-    if (written != sizeof(LapHeader)) {
-        fclose(f);
-        remove(getBestLapPath());
-        return false;
-    }
-
-    written = fwrite(lap.points.data(), 1, lap.points.size() * sizeof(StoredPoint), f);
-    fclose(f);
-
-    if (written != lap.points.size() * sizeof(StoredPoint)) {
-        remove(getBestLapPath());
-        return false;
-    }
-
-    ESP_LOGI(TAG, "NEW BEST LAP: %.2fs", lap.totalTimeMs / 1000.0f);
-    return true;
-}
-
-bool loadBestLap(StorableLap& lap) {
-    if (!fileExists(getBestLapPath())) {
-        return false;
-    }
-
-    FILE* f = fopen(getBestLapPath(), "rb");
+    FILE* f = fopen(path, "rb");
     if (!f) {
         return false;
     }
 
     LapHeader header;
-    size_t read = fread(&header, 1, sizeof(LapHeader), f);
-    if (read != sizeof(LapHeader) || header.magic != LAP_FILE_MAGIC) {
+    size_t rd = fread(&header, 1, sizeof(LapHeader), f);
+    if (rd != sizeof(LapHeader) || header.magic != LAP_FILE_MAGIC) {
         fclose(f);
         return false;
     }
 
     lap.points.resize(header.pointCount);
-    read = fread(lap.points.data(), 1, header.pointCount * sizeof(StoredPoint), f);
+    rd = fread(lap.points.data(), 1, header.pointCount * sizeof(StoredPoint), f);
     fclose(f);
 
-    if (read != header.pointCount * sizeof(StoredPoint)) {
+    if (rd != header.pointCount * sizeof(StoredPoint)) {
         lap.points.clear();
         return false;
     }
@@ -336,29 +315,116 @@ bool loadBestLap(StorableLap& lap) {
     lap.avgSpeedKmh = header.avgSpeedX10 / 10.0f;
     lap.sessionId = header.sessionId;
     lap.lapId = header.lapId;
+    if (header.version >= 2) {
+        lap.trackIndex = header.trackIndex;
+        lap.layoutIndex = header.layoutIndex;
+    } else {
+        lap.trackIndex = 0xFF;
+        lap.layoutIndex = 0xFF;
+    }
 
     return true;
 }
 
-bool hasBestLap() {
-    return fileExists(getBestLapPath());
+bool saveBestLap(const StorableLap& lap, const char* trackId, const char* layoutId) {
+    if (lap.points.empty() || !trackId || !layoutId) {
+        return false;
+    }
+
+    const char* path = getBestLapPathForTrack(trackId, layoutId);
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        return false;
+    }
+
+    LapHeader header = {};
+    header.magic = LAP_FILE_MAGIC;
+    header.version = 2;
+    header.pointCount = lap.points.size();
+    header.totalTimeMs = lap.totalTimeMs;
+    header.startTimestamp = lap.startTimestamp;
+    header.maxSpeedX10 = (uint16_t)(lap.maxSpeedKmh * 10);
+    header.avgSpeedX10 = (uint16_t)(lap.avgSpeedKmh * 10);
+    header.sessionId = lap.sessionId;
+    header.lapId = lap.lapId;
+    header.trackIndex = lap.trackIndex;
+    header.layoutIndex = lap.layoutIndex;
+
+    size_t written = fwrite(&header, 1, sizeof(LapHeader), f);
+    if (written != sizeof(LapHeader)) {
+        fclose(f);
+        remove(path);
+        return false;
+    }
+
+    written = fwrite(lap.points.data(), 1, lap.points.size() * sizeof(StoredPoint), f);
+    fclose(f);
+
+    if (written != lap.points.size() * sizeof(StoredPoint)) {
+        remove(path);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "NEW BEST LAP [%s/%s]: %.2fs", trackId, layoutId, lap.totalTimeMs / 1000.0f);
+    return true;
 }
 
-uint32_t getBestLapTime() {
-    if (!fileExists(getBestLapPath())) {
+bool loadBestLap(StorableLap& lap, const char* trackId, const char* layoutId) {
+    if (!trackId || !layoutId) {
+        return false;
+    }
+
+    // Try per-track file first
+    const char* path = getBestLapPathForTrack(trackId, layoutId);
+    if (loadBestLapFromFile(lap, path)) {
+        return true;
+    }
+
+    // Fallback: legacy best.bin (for migration)
+    if (loadBestLapFromFile(lap, getLegacyBestLapPath())) {
+        ESP_LOGI(TAG, "Loaded legacy best.bin as fallback for %s/%s", trackId, layoutId);
+        return true;
+    }
+
+    return false;
+}
+
+bool hasBestLap(const char* trackId, const char* layoutId) {
+    if (!trackId || !layoutId) {
+        return false;
+    }
+    if (fileExists(getBestLapPathForTrack(trackId, layoutId))) {
+        return true;
+    }
+    // Fallback: legacy
+    return fileExists(getLegacyBestLapPath());
+}
+
+uint32_t getBestLapTime(const char* trackId, const char* layoutId) {
+    if (!trackId || !layoutId) {
         return UINT32_MAX;
     }
 
-    FILE* f = fopen(getBestLapPath(), "rb");
+    // Try per-track file first
+    const char* path = getBestLapPathForTrack(trackId, layoutId);
+    if (!fileExists(path)) {
+        // Fallback: legacy
+        path = getLegacyBestLapPath();
+        if (!fileExists(path)) {
+            return UINT32_MAX;
+        }
+    }
+
+    FILE* f = fopen(path, "rb");
     if (!f) {
         return UINT32_MAX;
     }
 
     LapHeader header;
-    size_t read = fread(&header, 1, sizeof(LapHeader), f);
+    size_t rd = fread(&header, 1, sizeof(LapHeader), f);
     fclose(f);
 
-    if (read != sizeof(LapHeader) || header.magic != LAP_FILE_MAGIC) {
+    if (rd != sizeof(LapHeader) || header.magic != LAP_FILE_MAGIC) {
         return UINT32_MAX;
     }
 
@@ -369,14 +435,17 @@ uint32_t getBestLapTime() {
 // Recording Functions
 // ============================================================
 
-void startRecordingLap(uint16_t sessionId, uint16_t lapId) {
+void startRecordingLap(uint16_t sessionId, uint16_t lapId,
+                       uint8_t trackIndex, uint8_t layoutIndex) {
     s_recording.points.clear();
-    s_recording.points.reserve(MAX_POINTS_PER_LAP);
+    s_recording.points.reserve(INIT_POINTS_RESERVE);
     s_recording.sessionId = sessionId;
     s_recording.lapId = lapId;
-    s_recording.startTimestamp = 0;  // Set from GPS or system time
+    s_recording.startTimestamp = (uint32_t)time(nullptr);
     s_recording.maxSpeedKmh = 0;
     s_recording.totalSpeed = 0;
+    s_recording.trackIndex = trackIndex;
+    s_recording.layoutIndex = layoutIndex;
     s_recording.active = true;
 }
 
@@ -418,6 +487,8 @@ bool finishRecordingLap(StorableLap& outLap) {
     outLap.avgSpeedKmh = s_recording.totalSpeed / outLap.points.size();
     outLap.sessionId = s_recording.sessionId;
     outLap.lapId = s_recording.lapId;
+    outLap.trackIndex = s_recording.trackIndex;
+    outLap.layoutIndex = s_recording.layoutIndex;
 
     s_recording = {};
     return true;

@@ -53,6 +53,10 @@
 #include "pcf85063.h"
 #include "qmi8658c.h"
 #include "sdcard_manager.h"
+#include "display_config.h"
+#include "sensor_fusion.h"
+#include "page_manager.h"
+#include "track_manager.h"
 
 static const char *TAG = "MAIN";
 
@@ -275,6 +279,25 @@ static void imuTask(void *arg)
         if (imuRead(&data)) {
             gApp.imuData = data;
             gApp.imuReady = true;
+
+            // Sensor fusion: 칼만 필터 predict (100Hz)
+            if (gApp.fusionActive && axisCalibIsValid()) {
+                const float* R = axisCalibGetR();
+                float ax = data.accelX, ay = data.accelY, az = data.accelZ;
+
+                // 센서 → NED 회전: aNED = R * aSensor
+                float aN = R[0]*ax + R[1]*ay + R[2]*az;
+                float aE = R[3]*ax + R[4]*ay + R[5]*az;
+                // R[6..8] = down axis (속도 퓨전에는 불필요)
+
+                // GPS heading 방향으로 투영 → 전진 가속도
+                float h = gApp.lastGpsHeadingRad;
+                float fwdAccelG = aN * cosf(h) + aE * sinf(h);
+                float fwdAccelMs2 = fwdAccelG * 9.80665f;
+
+                speedKfPredict(fwdAccelMs2, 0.01f);  // 10ms = 100Hz
+                gApp.fusedSpeedKmh = speedKfGetSpeedKmh();
+            }
         }
 
         // 1초마다 온도 읽기
@@ -350,34 +373,6 @@ void updateDisplayData(const GPSPoint& point, const DeltaResult& delta,
         lframe.dist_start = 0;
     }
     lframe.pts = gApp.referenceLap.points.size();
-
-    // GPS 시간으로 시스템 시계 + RTC 동기화 (GPS 모드, 최초 1회)
-    // gpsTimeSet은 RTC에서 이미 설정될 수 있으므로 별도 플래그 사용
-    static bool s_gpsClockSynced = false;
-    if (!gApp.isSimulationMode() && !s_gpsClockSynced) {
-        UBloxData ubx = getUBloxData();
-        if (ubx.timeValid && ubx.year >= 2024) {
-            struct tm gpsTime = {};
-            gpsTime.tm_year = ubx.year - 1900;
-            gpsTime.tm_mon  = ubx.month - 1;
-            gpsTime.tm_mday = ubx.day;
-            gpsTime.tm_hour = ubx.hour;
-            gpsTime.tm_min  = ubx.minute;
-            gpsTime.tm_sec  = ubx.second;
-            time_t utcEpoch = mktime(&gpsTime);
-            struct timeval tv = { .tv_sec = utcEpoch, .tv_usec = 0 };
-            settimeofday(&tv, NULL);
-            gApp.gpsTimeSet = true;
-            s_gpsClockSynced = true;
-            ESP_LOGI(TAG, "System clock set from GPS: %04d-%02d-%02d %02d:%02d:%02d UTC",
-                     ubx.year, ubx.month, ubx.day, ubx.hour, ubx.minute, ubx.second);
-
-            // GPS 시간을 RTC에 저장 (다음 부팅 시 즉시 사용)
-            if (rtcIsReady() && rtcWrite(&gpsTime)) {
-                s_rtcOsInvalid = false;  // OS bit 클리어됨, 다음 읽기 허용
-            }
-        }
-    }
 
     // 시스템 시계에서 KST(UTC+9) 시간 표시 — 1초에 1번만 업데이트
     // Time display source policy:
@@ -483,9 +478,13 @@ void onLapComplete(unsigned long lapTimeMs) {
         saveLap(completedLap);
 
         // Check if new best
+        const char* tid = getActiveTrackId();
+        const char* lid = getActiveLayoutId();
         if (lapTimeMs < gApp.bestLapTimeMs) {
             gApp.bestLapTimeMs = lapTimeMs;
-            saveBestLap(completedLap);
+            if (tid && lid) {
+                saveBestLap(completedLap, tid, lid);
+            }
 
             // 새 베스트랩을 referenceLap에 즉시 반영 (Phase 7)
             LapData newRef;
@@ -530,7 +529,8 @@ void onLapComplete(unsigned long lapTimeMs) {
     resetSectorTiming();
 
     // Start new recording
-    startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber);
+    startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber,
+                      getActiveTrackIndex(), getActiveTrackLayoutIndex());
 }
 
 /**
@@ -572,8 +572,15 @@ static bool convertStorableToLapData(const StorableLap& stored, LapData& out) {
 }
 
 bool loadReferenceLapFromStorage(void) {
+    const char* tid = getActiveTrackId();
+    const char* lid = getActiveLayoutId();
+    if (!tid || !lid) {
+        ESP_LOGW(TAG, "loadReferenceLap: no active track");
+        return false;
+    }
+
     StorableLap stored;
-    if (!loadBestLap(stored)) {
+    if (!loadBestLap(stored, tid, lid)) {
         return false;
     }
 
@@ -582,6 +589,8 @@ bool loadReferenceLapFromStorage(void) {
     }
 
     gApp.bestLapTimeMs = gApp.referenceLap.totalTimeMs;
+    ESP_LOGI(TAG, "Loaded best lap for %s/%s: %.2fs (%d pts)",
+             tid, lid, stored.totalTimeMs / 1000.0f, (int)stored.points.size());
     return true;
 }
 
@@ -674,18 +683,12 @@ static void app_init(void) {
     // SPIFFS에서 설정 로드 (phoneNumber 등)
     loadSettings();
 
-    // SD 카드 읽기는 WiFi 시작 전에 수행 (WiFi가 내부 RAM을 많이 차지하므로)
-    // Load reference lap
-    ESP_LOGI(TAG, "Loading reference lap...");
-    if (loadReferenceLapFromStorage()) {
-        ESP_LOGI(TAG, "  From storage: %d pts, %.2fs (BEST)",
-                 (int)gApp.referenceLap.points.size(), gApp.referenceLap.totalTimeMs / 1000.0f);
-        gApp.hasValidReferenceLap = true;
-    } else {
-        ESP_LOGI(TAG, "  No saved reference - starting fresh");
-        gApp.hasValidReferenceLap = false;
-        gApp.bestLapTimeMs = UINT32_MAX;
-    }
+    // SD 카드 디스플레이 설정 로드 (/sdcard/config/display.json, 없으면 디폴트)
+    loadDisplayConfig();
+
+    // 베스트 랩은 트랙 감지 후 로드 (PRE_TRACK → SESSION_ACTIVE 전환 시)
+    gApp.hasValidReferenceLap = false;
+    gApp.bestLapTimeMs = UINT32_MAX;
 
     // Get session number
     gApp.currentSessionNumber = getNextSessionId();
@@ -760,6 +763,10 @@ static void app_init(void) {
     gpio_config(&pwr_gpio);
     ESP_LOGI(TAG, "PWR button: GPIO%d", PWR_BUTTON_PIN);
 
+    // Initialize page system (registers all pages, navigates to MODE_SELECT)
+    // Must be called after createStartupScreen() (LVGL widgets) and GPS init
+    initPageSystem();
+
     ESP_LOGI(TAG, "Type 'h' for command help");
 }
 
@@ -792,6 +799,41 @@ static void checkPowerButton(void)
 }
 
 // ============================================================
+// GPS → SYSTEM CLOCK + RTC SYNC (최초 1회)
+// ============================================================
+
+static bool s_gpsClockSynced = false;
+
+static void syncGpsClockIfNeeded() {
+    if (s_gpsClockSynced) return;
+    if (!isGPSModuleEnabled()) return;
+
+    UBloxData ubx = getUBloxData();
+    if (!ubx.timeValid || ubx.year < 2024) return;
+
+    struct tm gpsTime = {};
+    gpsTime.tm_year = ubx.year - 1900;
+    gpsTime.tm_mon  = ubx.month - 1;
+    gpsTime.tm_mday = ubx.day;
+    gpsTime.tm_hour = ubx.hour;
+    gpsTime.tm_min  = ubx.minute;
+    gpsTime.tm_sec  = ubx.second;
+    time_t utcEpoch = mktime(&gpsTime);
+    struct timeval tv = { .tv_sec = utcEpoch, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    gApp.gpsTimeSet = true;
+    s_gpsClockSynced = true;
+    ESP_LOGI(TAG, "System clock set from GPS: %04d-%02d-%02d %02d:%02d:%02d UTC",
+             ubx.year, ubx.month, ubx.day, ubx.hour, ubx.minute, ubx.second);
+
+    // GPS 시간을 RTC에 저장 (다음 부팅 시 즉시 사용)
+    if (rtcIsReady() && rtcWrite(&gpsTime)) {
+        s_rtcOsInvalid = false;  // OS bit 클리어됨, 다음 읽기 허용
+        ESP_LOGI(TAG, "RTC synced from GPS");
+    }
+}
+
+// ============================================================
 // MAIN TASK
 // ============================================================
 
@@ -800,34 +842,13 @@ static void main_task(void *pvParameters) {
 
     unsigned long lastDisplayUpdate = 0;
     unsigned long lastBatteryRead = 0;
-    bool modeInitialized = false;
 
     while (1) {
-        // 시작 화면 중에는 GPS/시뮬레이션 처리 건너뜀
-        // (GPS 폴링은 updateStartupScreen에서 직접 수행)
-        if (!isStartupScreenActive()) {
-            if (isGpsStatusOnlyMode()) {
-                // GPS STATUS 진단 모드: UART 폴링만 수행 (랩타이머 비활성)
-                updateUBloxGPS();
-            } else {
-                // 시작 화면에서 모드 선택 후 최초 1회 초기화
-                if (!modeInitialized) {
-                    ESP_LOGI(TAG, "Mode: %s", gApp.isSimulationMode() ? "EMULATION" : "LAPTIMER");
-                    if (gApp.isSimulationMode()) {
-                        initializeSimulation();
-                    } else {
-                        initializeGPSMode();
-                    }
-                    modeInitialized = true;
-                }
+        // Page system handles all processing: GPS polling, session processing, etc.
+        gPageManager.tick();
 
-                if (gApp.currentGpsMode == GPSMode::SIMULATION) {
-                    processSimulation();
-                } else {
-                    processRealGPS();
-                }
-            }
-        }
+        // GPS → 시스템 시계 + RTC 동기화 (세션 상태 무관, 최초 1회)
+        syncGpsClockIfNeeded();
 
         // PWR 버튼 체크 (배터리 모드 전원 오프)
         checkPowerButton();
@@ -835,10 +856,10 @@ static void main_task(void *pvParameters) {
         // Handle serial commands
         handleSerialCommands();
 
-        // Update display at fixed rate
+        // Update display at fixed rate (~60Hz)
         unsigned long now = millis();
         if (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL_MS) {
-            displayLoop();
+            gPageManager.update();
             lastDisplayUpdate = now;
         }
 

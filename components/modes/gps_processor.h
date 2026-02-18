@@ -19,14 +19,15 @@
 /**
  * @brief GPS session lifecycle states
  *
- * PRE_TRACK  → NEAR_TRACK (proximity detected)
- * NEAR_TRACK → SESSION_ACTIVE (finish line crossed at 60+ km/h)
- * NEAR_TRACK → PRE_TRACK (left track proximity)
- * SESSION_ACTIVE: continuous lap counting, no return to NEAR_TRACK
+ * PRE_TRACK      → SESSION_ACTIVE (finish line crossed at 60+ km/h)
+ * SESSION_ACTIVE: continuous lap counting
+ *
+ * Track identification: PRE_TRACK checks all registered tracks' finish lines
+ * each GPS update. When a finish line is crossed at speed, the track is
+ * automatically identified and session begins.
  */
 enum class GPSSessionState {
-    PRE_TRACK,      // 트랙 근처 아님 — 속도+시각만 표시
-    NEAR_TRACK,     // 트랙 감지됨, 60km/h 스타트라인 통과 대기
+    PRE_TRACK,      // 피니시라인 통과 대기 — 속도+시각 표시
     SESSION_ACTIVE  // 레이싱 중 (연속 랩 타이밍)
 };
 
@@ -104,7 +105,7 @@ unsigned long getLastValidGpsTimeMs();
 GPSSessionState getGPSSessionState();
 
 /**
- * @brief Check if GPS mode is in PRE_TRACK or NEAR_TRACK (not yet in session)
+ * @brief Check if GPS mode is in PRE_TRACK (not yet in session)
  */
 bool isGPSPreSession();
 

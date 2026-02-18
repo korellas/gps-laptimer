@@ -33,7 +33,7 @@ bool sdLoggerInit(void);
  * @param heading  Heading in degrees
  * @param fixType  u-blox fixType (0=no fix, 2=2D, 3=3D)
  * @param sats     Satellites used
- * @param state    Session state string ("PRE_TRACK"/"NEAR_TRACK"/"SESSION_ACTIVE")
+ * @param state    Session state string ("PRE_TRACK"/"SESSION_ACTIVE")
  * @param lapMs    Current lap time in ms (0 if not in session)
  */
 void sdLogGPS(unsigned long ms,

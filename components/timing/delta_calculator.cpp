@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdio>
 
+#include "esp_timer.h"
+
 // cos(lat) 사전계산 캐시 (트랙 위도 기준, 세그먼트 검색에 재사용)
 static float s_cosLat = 0.0f;
 
@@ -228,6 +230,14 @@ DeltaResult calculateDelta(const GPSPoint& current, const LapData& reference,
     result.refPointIndex = bestSegmentStart;
 
     if (bestSegmentStart < 0 || minDistanceM >= MAX_PROJECTION_DISTANCE_M) {
+        // 진단 로그: 투영 실패 시 1초에 1번만 출력
+        static unsigned long s_lastFailLog = 0;
+        unsigned long nowMs = (unsigned long)(esp_timer_get_time() / 1000ULL);
+        if (nowMs - s_lastFailLog >= 1000) {
+            printf("[DeltaCalc] PROJ FAIL: dist=%.1fm seg=%d searchRange=[%d,%d]\n",
+                   minDistanceM, bestSegmentStart, searchStart, searchEnd);
+            s_lastFailLog = nowMs;
+        }
         return result;
     }
 

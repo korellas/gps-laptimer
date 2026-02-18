@@ -5,10 +5,8 @@
  */
 
 #include "track_manager.h"
-#include "../geo/geo_utils.h"
 #include "config.h"
 
-#include <cfloat>
 #include <cstring>
 
 #include "esp_log.h"
@@ -23,9 +21,6 @@ static const char *TAG = "TrackMgr";
 static ActiveTrack s_activeTrack;
 static bool s_initialized = false;
 
-// Proximity state (separate from active track to avoid interference)
-static bool s_isNearTrack = false;
-static const TrackDefinition* s_proximityTrack = nullptr;
 
 // ============================================================
 // INITIALIZATION
@@ -40,87 +35,6 @@ void initTrackManager() {
 
 void resetTrackManager() {
     s_activeTrack.clear();
-    s_isNearTrack = false;
-    s_proximityTrack = nullptr;
-}
-
-// ============================================================
-// TRACK DETECTION
-// ============================================================
-
-const TrackDefinition* detectTrackByPosition(double lat, double lng) {
-    const TrackDefinition* bestTrack = nullptr;
-    float bestDistance = FLT_MAX;
-    
-    // Search all built-in tracks
-    for (int i = 0; i < BUILTIN_TRACK_COUNT; i++) {
-        const TrackDefinition* track = BUILTIN_TRACKS[i];
-        
-        float distance = haversineDistanceMeters(
-            lat, lng,
-            track->centerLat, track->centerLng
-        );
-        
-        // Check if within detection radius and closer than previous best
-        if (distance <= track->detectionRadiusM && distance < bestDistance) {
-            bestTrack = track;
-            bestDistance = distance;
-        }
-    }
-    
-    // If we found a track and it's different from current (or no current)
-    if (bestTrack != nullptr) {
-        // If no active track or not user-confirmed, auto-select
-        if (!s_activeTrack.isValid() || !s_activeTrack.userConfirmed) {
-            setActiveTrack(bestTrack, 0);
-            s_activeTrack.detectionDistanceM = bestDistance;
-            s_activeTrack.detectedAtMs = (unsigned long)(esp_timer_get_time() / 1000ULL);
-            
-            ESP_LOGI(TAG, "Auto-detected: %s (%.0fm from center)",
-                     bestTrack->name, bestDistance);
-        }
-    }
-    
-    return bestTrack;
-}
-
-bool isWithinActiveTrack(double lat, double lng) {
-    if (!s_activeTrack.isValid()) {
-        return false;
-    }
-    
-    float distance = haversineDistanceMeters(
-        lat, lng,
-        s_activeTrack.track->centerLat,
-        s_activeTrack.track->centerLng
-    );
-    
-    return distance <= s_activeTrack.track->detectionRadiusM;
-}
-
-float getDistanceToNearestTrack(double lat, double lng, const TrackDefinition** outTrack) {
-    const TrackDefinition* nearestTrack = nullptr;
-    float nearestDistance = FLT_MAX;
-    
-    for (int i = 0; i < BUILTIN_TRACK_COUNT; i++) {
-        const TrackDefinition* track = BUILTIN_TRACKS[i];
-        
-        float distance = haversineDistanceMeters(
-            lat, lng,
-            track->centerLat, track->centerLng
-        );
-        
-        if (distance < nearestDistance) {
-            nearestDistance = distance;
-            nearestTrack = track;
-        }
-    }
-    
-    if (outTrack != nullptr) {
-        *outTrack = nearestTrack;
-    }
-    
-    return nearestDistance;
 }
 
 // ============================================================
@@ -326,82 +240,30 @@ bool getBuiltinReferenceInfo(int& outStartIdx, int& outEndIdx, uint32_t& outTime
 }
 
 // ============================================================
-// PROXIMITY DETECTION (with hysteresis)
+// TRACK/LAYOUT ID ACCESS
 // ============================================================
 
-bool updateTrackProximity(double lat, double lng) {
-    // --- Hysteresis exit check: if already near, test at TRACK_PROXIMITY_HYSTERESIS_FACTOR× radius ---
-    if (s_isNearTrack && s_proximityTrack != nullptr) {
-        float exitRadius = s_proximityTrack->detectionRadiusM * TRACK_PROXIMITY_HYSTERESIS_FACTOR;
-
-        // Stage 1: bounding box pre-filter (METERS_PER_DEG_LAT ≈ 111320; use same for lng as pre-filter)
-        float dlat_m = (float)((lat - s_proximityTrack->centerLat) * METERS_PER_DEG_LAT);
-        float dlng_m = (float)((lng - s_proximityTrack->centerLng) * METERS_PER_DEG_LAT);
-        if (dlat_m < 0) dlat_m = -dlat_m;
-        if (dlng_m < 0) dlng_m = -dlng_m;
-
-        bool outsideBbox = (dlat_m > exitRadius || dlng_m > exitRadius);
-        if (outsideBbox) {
-            ESP_LOGI(TAG, "Left proximity of %s (bbox)", s_proximityTrack->name);
-            s_isNearTrack = false;
-            s_proximityTrack = nullptr;
-        } else {
-            // Stage 2: precise haversine
-            float dist = haversineDistanceMeters(lat, lng,
-                s_proximityTrack->centerLat, s_proximityTrack->centerLng);
-            if (dist >= exitRadius) {
-                ESP_LOGI(TAG, "Left proximity of %s (%.0fm >= %.0fm)",
-                         s_proximityTrack->name, dist, exitRadius);
-                s_isNearTrack = false;
-                s_proximityTrack = nullptr;
-            }
-        }
-
-        if (s_isNearTrack) return true;  // Still near, skip scan
-    }
-
-    // --- Entry check: scan all tracks at 1× radius ---
+uint8_t getActiveTrackIndex() {
+    if (!s_activeTrack.isValid()) return 0xFF;
     for (int i = 0; i < BUILTIN_TRACK_COUNT; i++) {
-        const TrackDefinition* track = BUILTIN_TRACKS[i];
-        float radius = track->detectionRadiusM;
-
-        // Stage 1: cheap bounding box pre-filter
-        float dlat_m = (float)((lat - track->centerLat) * METERS_PER_DEG_LAT);
-        float dlng_m = (float)((lng - track->centerLng) * METERS_PER_DEG_LAT);
-        if (dlat_m < 0) dlat_m = -dlat_m;
-        if (dlng_m < 0) dlng_m = -dlng_m;
-        if (dlat_m > radius || dlng_m > radius) continue;
-
-        // Stage 2: haversine
-        float dist = haversineDistanceMeters(lat, lng,
-            track->centerLat, track->centerLng);
-        if (dist <= radius) {
-            s_isNearTrack = true;
-            s_proximityTrack = track;
-            ESP_LOGI(TAG, "Near track: %s (%.0fm)", track->name, dist);
-
-            // Auto-select active track if none confirmed
-            if (!s_activeTrack.isValid() || !s_activeTrack.userConfirmed) {
-                setActiveTrack(track, 0);
-                s_activeTrack.detectionDistanceM = dist;
-                s_activeTrack.detectedAtMs = (unsigned long)(esp_timer_get_time() / 1000ULL);
-            }
-            return true;
-        }
+        if (BUILTIN_TRACKS[i] == s_activeTrack.track) return (uint8_t)i;
     }
-
-    return false;
+    return 0xFF;
 }
 
-bool isNearAnyTrack() {
-    return s_isNearTrack;
+uint8_t getActiveTrackLayoutIndex() {
+    if (!s_activeTrack.isValid()) return 0xFF;
+    return (uint8_t)s_activeTrack.layoutIndex;
 }
 
-const char* getNearTrackName() {
-    if (s_isNearTrack && s_proximityTrack != nullptr) {
-        return s_proximityTrack->name;
-    }
-    return nullptr;
+const char* getActiveTrackId() {
+    if (!s_activeTrack.isValid()) return nullptr;
+    return s_activeTrack.track->id;
+}
+
+const char* getActiveLayoutId() {
+    if (!s_activeTrack.isValid() || !s_activeTrack.layout) return nullptr;
+    return s_activeTrack.layout->id;
 }
 
 // ============================================================

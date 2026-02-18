@@ -11,4 +11,5 @@ idf_component_register(
         timing
         common
         sd_logger
+        sensor_fusion
 )

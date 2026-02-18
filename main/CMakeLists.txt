@@ -2,6 +2,18 @@ idf_component_register(
     SRCS
         "main.cpp"
         "waveshare_display.cpp"
+        "display_config.cpp"
+        "page_manager.cpp"
+        "pages/transition_page.cpp"
+        "pages/phone_plate_page.cpp"
+        "pages/settings_page.cpp"
+        "pages/ble_ota_page.cpp"
+        "pages/wait_gps_page.cpp"
+        "pages/mode_select_page.cpp"
+        "pages/gps_status_page.cpp"
+        "pages/pre_track_page.cpp"
+        "pages/laptimer_page.cpp"
+        "pages/emulation_page.cpp"
         "ublox_gps.cpp"
         "finish_line.cpp"
         "lap_storage.cpp"
@@ -32,6 +44,8 @@ idf_component_register(
         sd_logger
         ota
         ble_ota
+        json
+        sensor_fusion
 )
 
 # Font files need this to find lvgl.h properly

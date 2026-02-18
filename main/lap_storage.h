@@ -18,7 +18,8 @@
 #include "config.h"  // For MAX_LAPS_PER_SESSION, MAX_SESSIONS
 
 constexpr uint32_t LAP_FILE_MAGIC = 0x4C415001;  // "LAP" + version 1
-constexpr int MAX_POINTS_PER_LAP = 1000;
+constexpr int MAX_POINTS_PER_LAP   = 12000;  // Safety cap only: 20min @ 10Hz (Nürburgring ~10min)
+constexpr int INIT_POINTS_RESERVE  =  1200;  // Initial vector reserve (~2min, grows dynamically)
 // MAX_LAPS_PER_SESSION and MAX_SESSIONS are defined in config.h
 
 // ============================================================
@@ -37,15 +38,17 @@ struct StoredPoint {
 
 struct LapHeader {
     uint32_t magic;
-    uint16_t version;
+    uint16_t version;         // v2: added trackIndex/layoutIndex
     uint16_t pointCount;
     uint32_t totalTimeMs;
-    uint32_t startTimestamp;  // Unix epoch
+    uint32_t startTimestamp;  // Unix epoch (KST)
     uint16_t maxSpeedX10;
     uint16_t avgSpeedX10;
     uint16_t sessionId;
     uint16_t lapId;
-    uint8_t reserved[8];
+    uint8_t  trackIndex;     // BUILTIN_TRACKS[] index, 0xFF=unknown
+    uint8_t  layoutIndex;    // layouts[] index, 0xFF=unknown
+    uint8_t  reserved[6];
 };
 
 #pragma pack(pop)
@@ -70,6 +73,8 @@ struct StorableLap {
     float avgSpeedKmh;
     uint16_t sessionId;
     uint16_t lapId;
+    uint8_t trackIndex = 0xFF;
+    uint8_t layoutIndex = 0xFF;
 };
 
 // ============================================================
@@ -84,11 +89,11 @@ bool saveLap(const StorableLap& lap);
 bool loadLap(StorableLap& lap, uint16_t sessionId, uint16_t lapId);
 bool deleteLap(uint16_t sessionId, uint16_t lapId);
 
-// Best lap
-bool saveBestLap(const StorableLap& lap);
-bool loadBestLap(StorableLap& lap);
-bool hasBestLap();
-uint32_t getBestLapTime();
+// Best lap (per-track)
+bool saveBestLap(const StorableLap& lap, const char* trackId, const char* layoutId);
+bool loadBestLap(StorableLap& lap, const char* trackId, const char* layoutId);
+bool hasBestLap(const char* trackId, const char* layoutId);
+uint32_t getBestLapTime(const char* trackId, const char* layoutId);
 
 // Listing
 int listLaps(uint16_t sessionId, LapInfo* outList, int maxCount);
@@ -96,7 +101,8 @@ int getSessionCount();
 uint16_t getNextSessionId();
 
 // Recording helpers
-void startRecordingLap(uint16_t sessionId, uint16_t lapId);
+void startRecordingLap(uint16_t sessionId, uint16_t lapId,
+                       uint8_t trackIndex = 0xFF, uint8_t layoutIndex = 0xFF);
 void addPointToRecording(double lat, double lng, unsigned long lapTimeMs,
                           float speedKmh, float headingDeg);
 bool finishRecordingLap(StorableLap& outLap);

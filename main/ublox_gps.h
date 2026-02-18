@@ -59,10 +59,16 @@ struct UBloxData {
     float altitudeM;      // 해발 고도 (hMSL, offset 32-35, mm→m)
     float hdop;           // pDOP (offset 76-77, ×0.01)
 
+    // NED 속도 벡터 (센서 퓨전 캘리브레이션용)
+    float velNorthMps;    // 북쪽 속도 (m/s, offset 48-51)
+    float velEastMps;     // 동쪽 속도 (m/s, offset 52-55)
+    float velDownMps;     // 하강 속도 (m/s, offset 56-59, 양수=하강)
+
     UBloxData() : lat(0), lon(0), speedKmh(0), headingDeg(0),
                   fixType(0), satellites(0), valid(false), iTOW(0),
                   year(0), month(0), day(0), hour(0), minute(0), second(0),
-                  timeValid(false), altitudeM(0), hdop(99.9f) {}
+                  timeValid(false), altitudeM(0), hdop(99.9f),
+                  velNorthMps(0), velEastMps(0), velDownMps(0) {}
 };
 
 // GPS 통계 (Hz 측정, UART 건강도)

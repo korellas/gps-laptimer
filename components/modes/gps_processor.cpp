@@ -21,8 +21,10 @@
 #include "../geo/dead_reckoning.h"
 #include "../track/track_manager.h"
 #include "sd_logger.h"
+#include "sensor_fusion.h"
 
 #include <cstdio>
+#include <cmath>
 
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -36,6 +38,7 @@ static const char *TAG = "GPS_PROC";
 extern void updateDisplayData(const GPSPoint& point, const DeltaResult& delta,
                               unsigned long lapTimeMs, float refTimeSec);
 extern void onLapComplete(unsigned long lapTimeMs);
+extern bool loadReferenceLapFromStorage(void);
 
 // ============================================================
 // MODULE STATE
@@ -49,6 +52,10 @@ static GPSSessionState s_sessionState = GPSSessionState::PRE_TRACK;
 // 동적 섹터 경계 (활성 트랙에서 setupSectorBoundariesFromActiveTrack()으로 설정)
 static SectorBoundaryPoint s_sectorBoundaries[MAX_SECTORS_PER_LAYOUT];
 static int s_sectorBoundaryCount = 0;
+
+// Sensor fusion: 캘리브레이션 시도 타이머
+static unsigned long s_lastCalibAttemptMs = 0;
+static constexpr unsigned long CALIB_ATTEMPT_INTERVAL_MS = 10000;  // 10초
 
 // ============================================================
 // HELPER: millis()
@@ -101,7 +108,8 @@ static void startSession(unsigned long nowMs) {
     gpsState.lapStartMs = nowMs;
     gpsState.lapStarted = true;
 
-    startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber);
+    startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber,
+                      getActiveTrackIndex(), getActiveTrackLayoutIndex());
 
     // SD 카드 세션 CSV 시작
     sdSessionStart();
@@ -125,8 +133,15 @@ static void startSession(unsigned long nowMs) {
 
     s_sessionState = GPSSessionState::SESSION_ACTIVE;
 
-    // PRE_TRACK 디스플레이 해제
-    setPreTrackMode(false, nullptr);
+    // Sensor fusion: 칼만 필터 초기화
+    if (axisCalibIsValid()) {
+        speedKfInit(gApp.currentPoint.speedKmh / 3.6f);
+        gApp.fusionActive = true;
+        gApp.fusionInDR = false;
+        ESP_LOGI(TAG, "Sensor fusion active (speed KF initialized)");
+    } else {
+        ESP_LOGI(TAG, "Sensor fusion inactive (no axis calibration)");
+    }
 
     ESP_LOGI(TAG, "Session started (lapStartMs=%lu)", nowMs);
 }
@@ -164,12 +179,21 @@ void initializeGPSMode() {
     // Dead Reckoning 초기화
     initDeadReckoning();
 
+    // Sensor Fusion 초기화 (축 캘리브레이션 로드)
+    axisCalibInit();
+    if (axisCalibLoad()) {
+        ESP_LOGI(TAG, "Sensor fusion: loaded calibration (residual=%.3f)",
+                 axisCalibGetResidual());
+    } else {
+        ESP_LOGI(TAG, "Sensor fusion: no saved calibration, will collect during driving");
+    }
+    speedKfReset();
+    gApp.fusionActive = false;
+    gApp.fusionInDR = false;
+
     // 완료 표시 초기화
     lframe.lastCompletedLapMs = 0;
     lframe.lapCompleteDisplayEndMs = 0;
-
-    // PRE_TRACK 디스플레이 진입
-    setPreTrackMode(true, nullptr);
 
     ESP_LOGI(TAG, "GPS mode initialized → PRE_TRACK (ref=%s)",
              gApp.hasValidReferenceLap ? "YES" : "NO");
@@ -191,13 +215,44 @@ void resetRealGPS() {
     resetDeadReckoning();
     resetTrackManager();
 
+    // Sensor fusion: 샘플 버퍼 클리어 (저장된 캘리브레이션은 유지)
+    axisCalibReset();
+    speedKfReset();
+    gApp.fusionActive = false;
+    gApp.fusionInDR = false;
+
     // 세션 CSV 닫기
     sdSessionEnd();
     sdLogEvent(0, "GPS_MODE", "RESET");
 
-    setPreTrackMode(true, nullptr);
-
     ESP_LOGI(TAG, "GPS mode reset → PRE_TRACK");
+}
+
+// ============================================================
+// HELPER: 센서 퓨전 캘리브레이션 피드 + 주기적 solve
+// ============================================================
+
+static void feedCalibrationSample(const UBloxData& ubx, unsigned long now)
+{
+    if (!gApp.imuReady || !ubx.valid) return;
+
+    float aSensor[3] = {
+        gApp.imuData.accelX,
+        gApp.imuData.accelY,
+        gApp.imuData.accelZ
+    };
+
+    axisCalibFeedGPS(ubx.velNorthMps, ubx.velEastMps, ubx.velDownMps,
+                     ubx.speedKmh, ubx.iTOW, aSensor);
+
+    // 주기적으로 캘리브레이션 시도
+    if ((now - s_lastCalibAttemptMs) >= CALIB_ATTEMPT_INTERVAL_MS) {
+        s_lastCalibAttemptMs = now;
+        if (axisCalibSolve()) {
+            axisCalibSave();
+            gApp.fusionCalibDoneMs = now;
+        }
+    }
 }
 
 void processRealGPS() {
@@ -250,70 +305,51 @@ void processRealGPS() {
             switch (s_sessionState) {
 
             case GPSSessionState::PRE_TRACK: {
-                // 트랙 근접 감지
-                bool near = updateTrackProximity(point.lat, point.lng);
-                if (near) {
-                    const char* trackName = getNearTrackName();
-                    ESP_LOGI(TAG, "PRE_TRACK → NEAR_TRACK (%s)",
-                             trackName ? trackName : "?");
+                // 모든 트랙의 피니시라인을 체크하여 트랙 자동 식별 + 세션 시작
+                if (point.speedKmh >= SESSION_START_MIN_SPEED_KMH) {
+                    for (int ti = 0; ti < BUILTIN_TRACK_COUNT; ti++) {
+                        const TrackDefinition* track = BUILTIN_TRACKS[ti];
+                        for (int li = 0; li < track->layoutCount; li++) {
+                            const TrackLayout* layout = track->getLayout(li);
+                            if (!layout || !layout->finishLine.isConfigured()) continue;
 
-                    // 피니시라인 설정: SPIFFS 미설정 시 트랙 정의에서 로드
-                    if (!isFinishLineConfigured()) {
-                        const FinishLineDefinition* fl =
-                            getActiveTrackConst().getFinishLineDefinition();
-                        if (fl) setFinishLineFromDefinition(*fl);
+                            setFinishLineFromDefinition(layout->finishLine);
+                            if (checkFirstLineCrossing(point.lat, point.lng, point.headingDeg)) {
+                                // 트랙 식별 완료
+                                setActiveTrack(track, li);
+                                ESP_LOGI(TAG, "PRE_TRACK → SESSION_ACTIVE (%s / %s)",
+                                         track->name, layout->name);
+                                sdLogEvent(now, "TRACK", track->name);
+
+                                // 트랙별 베스트 랩 로드 (세션 시작 전)
+                                if (loadReferenceLapFromStorage()) {
+                                    gApp.hasValidReferenceLap = true;
+                                    ESP_LOGI(TAG, "Best lap loaded for %s/%s",
+                                             track->id, layout->id);
+                                }
+
+                                startSession(now);
+                                unsigned long lapTimeMs = 0;
+                                point.lapTimeMs = lapTimeMs;
+                                gApp.previousPoint = gApp.currentPoint;
+                                gApp.currentPoint = point;
+                                if (isRecording()) {
+                                    addPointToRecording(point.lat, point.lng, lapTimeMs,
+                                                        point.speedKmh, point.headingDeg);
+                                }
+                                gotNewData = true;
+                                goto exit_state_machine;
+                            }
+                        }
                     }
-
-                    s_sessionState = GPSSessionState::NEAR_TRACK;
-                    setPreTrackMode(true, trackName);
-                    sdLogEvent(now, "TRACK", trackName ? trackName : "?");
                 }
+
+                // Sensor fusion: 캘리브레이션 샘플 수집
+                feedCalibrationSample(ubx, now);
+
                 // SD 로그: PRE_TRACK GPS
                 sdLogGPS(now, point.lat, point.lng, point.speedKmh, point.headingDeg,
                          ubx.fixType, ubx.satellites, "PRE_TRACK", 0);
-                // PRE_TRACK: 디스플레이는 setPreTrackMode(true)가 처리
-                gApp.previousPoint = gApp.currentPoint;
-                gApp.currentPoint = point;
-                gotNewData = true;
-                break;
-            }
-
-            case GPSSessionState::NEAR_TRACK: {
-                // 근접 이탈 체크 (히스테리시스)
-                bool stillNear = updateTrackProximity(point.lat, point.lng);
-                if (!stillNear) {
-                    ESP_LOGI(TAG, "NEAR_TRACK → PRE_TRACK (left proximity)");
-                    s_sessionState = GPSSessionState::PRE_TRACK;
-                    setPreTrackMode(true, nullptr);
-                    sdLogEvent(now, "TRACK", "LEFT_PROXIMITY");
-                    gApp.previousPoint = gApp.currentPoint;
-                    gApp.currentPoint = point;
-                    gotNewData = true;
-                    break;
-                }
-
-                // SESSION_START_MIN_SPEED_KMH 이상에서 스타트라인 통과 감지
-                if (point.speedKmh >= SESSION_START_MIN_SPEED_KMH) {
-                    if (checkFirstLineCrossing(point.lat, point.lng, point.headingDeg)) {
-                        startSession(now);
-                        // SESSION_ACTIVE로 전환됨 — lapStartMs는 startSession()이 설정
-                        unsigned long lapTimeMs = 0;
-                        point.lapTimeMs = lapTimeMs;
-                        gApp.previousPoint = gApp.currentPoint;
-                        gApp.currentPoint = point;
-                        if (isRecording()) {
-                            addPointToRecording(point.lat, point.lng, lapTimeMs,
-                                                point.speedKmh, point.headingDeg);
-                        }
-                        gotNewData = true;
-                        break;
-                    }
-                }
-
-                // SD 로그: NEAR_TRACK GPS
-                sdLogGPS(now, point.lat, point.lng, point.speedKmh, point.headingDeg,
-                         ubx.fixType, ubx.satellites, "NEAR_TRACK", 0);
-                // NEAR_TRACK: 속도+시각 표시 유지 (PRE_TRACK 디스플레이)
                 gApp.previousPoint = gApp.currentPoint;
                 gApp.currentPoint = point;
                 gotNewData = true;
@@ -323,6 +359,14 @@ void processRealGPS() {
             case GPSSessionState::SESSION_ACTIVE: {
                 unsigned long lapTimeMs = now - gpsState.lapStartMs;
                 point.lapTimeMs = lapTimeMs;
+
+                // Sensor fusion: GPS 속도로 칼만 업데이트 + heading 갱신
+                if (gApp.fusionActive) {
+                    speedKfUpdate(ubx.speedKmh / 3.6f);
+                    gApp.fusedSpeedKmh = speedKfGetSpeedKmh();
+                    gApp.fusionInDR = false;
+                    gApp.lastGpsHeadingRad = ubx.headingDeg * (3.14159265f / 180.0f);
+                }
 
                 // 포인트 기록
                 if (isRecording()) {
@@ -379,6 +423,7 @@ void processRealGPS() {
                 break;
             }
             } // end switch
+            exit_state_machine:;
         }
     }
 
@@ -387,15 +432,33 @@ void processRealGPS() {
         if (!gotNewData && gpsState.lapStarted && gpsState.lastValidGpsMs > 0) {
             unsigned long elapsed = now - gpsState.lastValidGpsMs;
 
-            if (elapsed > DEAD_RECKONING_ACTIVATION_DELAY_MS && !isDeadReckoningActive() &&
-                gApp.currentPoint.speedKmh >= MIN_DEAD_RECKONING_SPEED_KMH) {
-                startDeadReckoning(gApp.currentPoint,
-                                  gApp.currentPoint.speedKmh,
-                                  gApp.currentPoint.headingDeg, now);
+            if (elapsed > DEAD_RECKONING_ACTIVATION_DELAY_MS) {
+                // IMU-aided dead reckoning: 칼만 필터가 imuTask에서 계속 predict 중
+                if (gApp.fusionActive && axisCalibIsValid()) {
+                    if (!gApp.fusionInDR) {
+                        gApp.fusionInDR = true;
+                        ESP_LOGI(TAG, "IMU-aided dead reckoning started (speed=%.1f km/h)",
+                                 gApp.fusedSpeedKmh);
+                    }
+                    // 칼만 필터 속도를 현재 포인트에 반영
+                    gApp.currentPoint.speedKmh = gApp.fusedSpeedKmh;
+                }
+
+                // 위치 추정: 기존 constant-velocity DR 유지 (속도만 퓨전 값 사용)
+                if (!isDeadReckoningActive() &&
+                    gApp.currentPoint.speedKmh >= MIN_DEAD_RECKONING_SPEED_KMH) {
+                    startDeadReckoning(gApp.currentPoint,
+                                      gApp.currentPoint.speedKmh,
+                                      gApp.currentPoint.headingDeg, now);
+                }
             }
 
             if (isDeadReckoningActive() && !isDeadReckoningExpired()) {
                 GPSPoint estimated = updateDeadReckoning(now);
+                // IMU 퓨전 속도가 있으면 DR 추정 포인트에도 반영
+                if (gApp.fusionActive && gApp.fusionInDR) {
+                    estimated.speedKmh = gApp.fusedSpeedKmh;
+                }
                 unsigned long lapTimeMs = now - gpsState.lapStartMs;
                 estimated.lapTimeMs = lapTimeMs;
                 updateDisplayData(estimated, gApp.currentDelta, lapTimeMs,
@@ -409,7 +472,7 @@ void processRealGPS() {
         updateDisplayData(gApp.currentPoint, gApp.currentDelta,
                          lapTimeMs, gApp.currentDelta.refTimeSec);
     }
-    // PRE_TRACK / NEAR_TRACK: updateLapData()가 setPreTrackMode로 처리
+    // PRE_TRACK: PreTrackPage handles display via updatePreTrackDisplay()
 }
 
 // ============================================================

@@ -127,8 +127,7 @@ struct TrackLayout {
     // Finish line for this layout
     FinishLineDefinition finishLine;
     
-    // Expected lap time (for UI hints, validation)
-    uint32_t expectedLapTimeMs; // Approximate expected lap time
+    // Lap time validation
     uint32_t minLapTimeMs;      // Minimum valid lap time (reject faster)
     uint32_t maxLapTimeMs;      // Maximum valid lap time (reject slower)
     
@@ -176,20 +175,15 @@ struct TrackLayout {
 
 /**
  * @brief Complete track/circuit definition
- * 
+ *
  * Represents a racing circuit with one or more layouts.
- * Tracks are auto-detected based on GPS position.
+ * Track is identified by finish line crossing (no proximity detection).
  */
 struct TrackDefinition {
     const char* id;             // Unique identifier ("everland", "inje")
     const char* name;           // Display name ("Everland Speedway")
     const char* country;        // Country code ("KR", "JP", "US")
-    
-    // Track center for auto-detection
-    double centerLat;           // Center latitude
-    double centerLng;           // Center longitude
-    float detectionRadiusM;     // Detection radius (meters)
-    
+
     // Layouts
     int layoutCount;            // Number of layouts
     const TrackLayout* layouts; // Array of layouts
@@ -240,19 +234,15 @@ struct ActiveTrack {
     const TrackDefinition* track;   // Selected track (nullptr if none)
     const TrackLayout* layout;      // Selected layout (nullptr if none)
     int layoutIndex;                // Index of selected layout
-    
-    // Detection info
-    float detectionDistanceM;       // Distance from track center when detected
-    unsigned long detectedAtMs;     // When track was detected (millis)
     bool userConfirmed;             // Has user confirmed this selection?
-    
+
     /**
      * @brief Check if a track is active
      */
     bool isValid() const {
         return track != nullptr && layout != nullptr;
     }
-    
+
     /**
      * @brief Clear active track
      */
@@ -260,8 +250,6 @@ struct ActiveTrack {
         track = nullptr;
         layout = nullptr;
         layoutIndex = -1;
-        detectionDistanceM = 0.0f;
-        detectedAtMs = 0;
         userConfirmed = false;
     }
     

@@ -152,6 +152,17 @@ static bool parseUbxMessage(const uint8_t* data, uint16_t len) {
                           (payload[34] << 16) | (payload[35] << 24));
         lastData.altitudeM = hMSL_mm / 1000.0f;
 
+        // velN/velE/velD (offsets 48/52/56, I4, mm/s) — NED 속도 벡터
+        int32_t velN = (int32_t)(payload[48] | (payload[49] << 8) |
+                       (payload[50] << 16) | (payload[51] << 24));
+        int32_t velE = (int32_t)(payload[52] | (payload[53] << 8) |
+                       (payload[54] << 16) | (payload[55] << 24));
+        int32_t velD = (int32_t)(payload[56] | (payload[57] << 8) |
+                       (payload[58] << 16) | (payload[59] << 24));
+        lastData.velNorthMps = velN * 0.001f;  // mm/s → m/s
+        lastData.velEastMps  = velE * 0.001f;
+        lastData.velDownMps  = velD * 0.001f;
+
         // pDOP (offset 76, U2, × 0.01)
         uint16_t pDOP_raw = (uint16_t)(payload[76] | (payload[77] << 8));
         lastData.hdop = pDOP_raw * 0.01f;

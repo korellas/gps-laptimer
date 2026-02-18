@@ -375,6 +375,13 @@ struct AppContext {
     ImuCalibration imuCalibration;
     bool imuReady = false;
 
+    // Sensor Fusion (GPS+IMU)
+    float fusedSpeedKmh = 0.0f;      // 칼만 필터 출력 속도 (km/h)
+    bool  fusionActive = false;       // 퓨전 동작 중 (칼만 필터 초기화됨)
+    bool  fusionInDR = false;         // GPS 없이 predict만 진행 중
+    float lastGpsHeadingRad = 0.0f;   // 마지막 GPS heading (forward 투영용, rad)
+    uint32_t fusionCalibDoneMs = 0;   // 캘리브레이션 완료 시각 (UI 알림용)
+
     // WiFi Portal settings (SPIFFS에 저장)
     char phoneNumber[32] = "";    // 전화번호 플레이트
 

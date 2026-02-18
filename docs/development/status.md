@@ -1,6 +1,6 @@
 # 현재 상태
 
-**최종 업데이트:** 2026-02-16
+**최종 업데이트:** 2026-02-19
 
 ## 🎯 현재 초점
 
@@ -18,7 +18,8 @@
 
 **진행 중:**
 - 🔄 문서 동기화 (DOC-01~07)
-- 📋 다중 트랙 지원 계획
+- 📋 저장소/설정 리팩토링 — [specs/storage-settings-refactor.md](../planning/specs/storage-settings-refactor.md)
+  - finish_line.bin 삭제, settings.json 통합, NEAR_TRACK 제거, 트랙 JSON 포맷
 
 ---
 
@@ -55,7 +56,7 @@
 - ✅ **WiFi 캡티브 포털** - SoftAP 모드, HTTP 서버, DNS 리다이렉트
 
 ### 데이터 및 저장소
-- ✅ **SPIFFS 통합** - 랩 데이터 영속성
+- ✅ **저장소** - 랩 데이터 영속성 (SD 우선, SPIFFS 폴백)
 - ✅ **레퍼런스 랩 로딩** - 에버랜드 52.83초 레퍼런스
 - ✅ **AppContext 패턴** - 단일 전역 상태 (`gApp`)
 - ✅ **누적 거리** - 델타 성능을 위해 사전 계산됨
@@ -77,18 +78,20 @@
   - 주요 발견: PM 비활성화, WiFi 상시 켜짐, 데드 코드 1300줄+
 
 ### 계획
-- 🔄 **다중 트랙 지원 스펙** - 여러 트랙 템플릿을 위한 설계
-- 🔄 **전력 최적화 계획** - PM 활성화, WiFi 타임아웃, CPU 주파수 스케일링
+- 📋 **저장소/설정 리팩토링** — [specs/storage-settings-refactor.md](../planning/specs/storage-settings-refactor.md)
+  - finish_line.bin 삭제 (dead path)
+  - settings.json 통합 확장 (deltaRef, customFinishLine)
+  - NEAR_TRACK 제거 → 2단계 상태머신 (PRE_TRACK → SESSION_ACTIVE)
+  - 트랙 JSON 포맷 + SD 로더 + 빌트인 폴백
+  - expectedLapTimeMs 제거 (dead code)
 
 ---
 
 ## 📋 계획됨 (높은 우선순위)
 
 ### P1 - 높음 (다음)
-- **다중 트랙 지원** - 여러 트랙 정의에서 로드/선택
-  - 트랙 템플릿 (에버랜드, 용인, 인제 등)
-  - GPS 위치 기반 자동 감지
-  - CSV 기반 트랙 데이터 형식
+- **저장소/설정 리팩토링** - finish_line.bin 삭제, settings.json 통합, NEAR_TRACK 제거
+- **트랙 JSON 포맷** - SD JSON 트랙 파일 + 빌트인 폴백, 피니시라인 기반 트랙 식별
 - **GPS 테스트 페이지** - LCD에서 GPS 진단 확인 (좌표, 위성, Hz, HDOP)
 
 ### P2 - 중간
@@ -177,15 +180,15 @@
 ## 🎯 다음 단계
 
 ### 단기 (이번 달)
-1. 📋 **다중 트랙 지원** — CSV 형식 정의, 3개+ 트랙 내장, 자동 감지
-2. 📋 **GPS 테스트 페이지** — LCD에서 GPS 진단 확인
-3. 📋 **GPS UART 이벤트 큐 전환** — 폴링→인터럽트 (중장기)
+1. 📋 **저장소/설정 리팩토링** — finish_line.bin 삭제, settings.json 통합, NEAR_TRACK 제거
+2. 📋 **트랙 JSON 포맷 + SD 로더** — 빌트인 오버라이드, 피니시라인 기반 트랙 식별
+3. 📋 **GPS 테스트 페이지** — LCD에서 GPS 진단 확인
 
 ### 장기 (다음 분기)
 1. 터치 UI 설정 메뉴
 2. OTA 업데이트 지원
-3. 추가 트랙 (용인, 인제, 태백)
-4. ULP 코프로세서 전원 모니터링
+3. 사용자 트랙 생성 (WiFi 웹 UI)
+4. Speed Mode (가속 측정)
 
 ---
 
