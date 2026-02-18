@@ -6,12 +6,15 @@
 
 #include "track_manager.h"
 #include "../geo/geo_utils.h"
+#include "config.h"
 
 #include <cfloat>
-#include <cstdio>
 #include <cstring>
 
+#include "esp_log.h"
 #include "esp_timer.h"
+
+static const char *TAG = "TrackMgr";
 
 // ============================================================
 // STATIC STATE
@@ -19,6 +22,10 @@
 
 static ActiveTrack s_activeTrack;
 static bool s_initialized = false;
+
+// Proximity state (separate from active track to avoid interference)
+static bool s_isNearTrack = false;
+static const TrackDefinition* s_proximityTrack = nullptr;
 
 // ============================================================
 // INITIALIZATION
@@ -28,12 +35,13 @@ void initTrackManager() {
     resetTrackManager();
     s_initialized = true;
     
-    printf("[TrackManager] Initialized with %d built-in tracks\n",
-           BUILTIN_TRACK_COUNT);
+    ESP_LOGI(TAG, "Initialized with %d built-in tracks", BUILTIN_TRACK_COUNT);
 }
 
 void resetTrackManager() {
     s_activeTrack.clear();
+    s_isNearTrack = false;
+    s_proximityTrack = nullptr;
 }
 
 // ============================================================
@@ -68,8 +76,8 @@ const TrackDefinition* detectTrackByPosition(double lat, double lng) {
             s_activeTrack.detectionDistanceM = bestDistance;
             s_activeTrack.detectedAtMs = (unsigned long)(esp_timer_get_time() / 1000ULL);
             
-            printf("[TrackManager] Auto-detected: %s (%.0fm from center)\n",
-                   bestTrack->name, bestDistance);
+            ESP_LOGI(TAG, "Auto-detected: %s (%.0fm from center)",
+                     bestTrack->name, bestDistance);
         }
     }
     
@@ -147,8 +155,8 @@ bool setActiveTrack(const TrackDefinition* track, int layoutIndex) {
     s_activeTrack.layoutIndex = layoutIndex;
     s_activeTrack.userConfirmed = false;
     
-    printf("[TrackManager] Active track: %s, layout: %s\n",
-           track->name, s_activeTrack.layout->name);
+    ESP_LOGI(TAG, "Active track: %s, layout: %s",
+             track->name, s_activeTrack.layout->name);
     
     return true;
 }
@@ -156,7 +164,7 @@ bool setActiveTrack(const TrackDefinition* track, int layoutIndex) {
 bool setActiveTrackById(const char* trackId, const char* layoutId) {
     const TrackDefinition* track = getBuiltinTrackById(trackId);
     if (track == nullptr) {
-        printf("[TrackManager] Track not found: %s\n", trackId);
+        ESP_LOGW(TAG, "Track not found: %s", trackId);
         return false;
     }
     
@@ -176,14 +184,13 @@ bool setActiveTrackById(const char* trackId, const char* layoutId) {
 
 void clearActiveTrack() {
     s_activeTrack.clear();
-    printf("[TrackManager] Active track cleared\n");
+    ESP_LOGI(TAG, "Active track cleared");
 }
 
 void confirmActiveTrack() {
     if (s_activeTrack.isValid()) {
         s_activeTrack.userConfirmed = true;
-        printf("[TrackManager] Track confirmed: %s\n",
-               s_activeTrack.track->name);
+        ESP_LOGI(TAG, "Track confirmed: %s", s_activeTrack.track->name);
     }
 }
 
@@ -203,8 +210,7 @@ bool setActiveLayout(int layoutIndex) {
     s_activeTrack.layout = s_activeTrack.track->getLayout(layoutIndex);
     s_activeTrack.layoutIndex = layoutIndex;
     
-    printf("[TrackManager] Layout changed: %s\n",
-           s_activeTrack.layout->name);
+    ESP_LOGI(TAG, "Layout changed: %s", s_activeTrack.layout->name);
     
     return true;
 }
@@ -317,6 +323,85 @@ bool getBuiltinReferenceInfo(int& outStartIdx, int& outEndIdx, uint32_t& outTime
     outTimeMs = s_activeTrack.layout->builtinRefTimeMs;
     
     return true;
+}
+
+// ============================================================
+// PROXIMITY DETECTION (with hysteresis)
+// ============================================================
+
+bool updateTrackProximity(double lat, double lng) {
+    // --- Hysteresis exit check: if already near, test at TRACK_PROXIMITY_HYSTERESIS_FACTOR× radius ---
+    if (s_isNearTrack && s_proximityTrack != nullptr) {
+        float exitRadius = s_proximityTrack->detectionRadiusM * TRACK_PROXIMITY_HYSTERESIS_FACTOR;
+
+        // Stage 1: bounding box pre-filter (METERS_PER_DEG_LAT ≈ 111320; use same for lng as pre-filter)
+        float dlat_m = (float)((lat - s_proximityTrack->centerLat) * METERS_PER_DEG_LAT);
+        float dlng_m = (float)((lng - s_proximityTrack->centerLng) * METERS_PER_DEG_LAT);
+        if (dlat_m < 0) dlat_m = -dlat_m;
+        if (dlng_m < 0) dlng_m = -dlng_m;
+
+        bool outsideBbox = (dlat_m > exitRadius || dlng_m > exitRadius);
+        if (outsideBbox) {
+            ESP_LOGI(TAG, "Left proximity of %s (bbox)", s_proximityTrack->name);
+            s_isNearTrack = false;
+            s_proximityTrack = nullptr;
+        } else {
+            // Stage 2: precise haversine
+            float dist = haversineDistanceMeters(lat, lng,
+                s_proximityTrack->centerLat, s_proximityTrack->centerLng);
+            if (dist >= exitRadius) {
+                ESP_LOGI(TAG, "Left proximity of %s (%.0fm >= %.0fm)",
+                         s_proximityTrack->name, dist, exitRadius);
+                s_isNearTrack = false;
+                s_proximityTrack = nullptr;
+            }
+        }
+
+        if (s_isNearTrack) return true;  // Still near, skip scan
+    }
+
+    // --- Entry check: scan all tracks at 1× radius ---
+    for (int i = 0; i < BUILTIN_TRACK_COUNT; i++) {
+        const TrackDefinition* track = BUILTIN_TRACKS[i];
+        float radius = track->detectionRadiusM;
+
+        // Stage 1: cheap bounding box pre-filter
+        float dlat_m = (float)((lat - track->centerLat) * METERS_PER_DEG_LAT);
+        float dlng_m = (float)((lng - track->centerLng) * METERS_PER_DEG_LAT);
+        if (dlat_m < 0) dlat_m = -dlat_m;
+        if (dlng_m < 0) dlng_m = -dlng_m;
+        if (dlat_m > radius || dlng_m > radius) continue;
+
+        // Stage 2: haversine
+        float dist = haversineDistanceMeters(lat, lng,
+            track->centerLat, track->centerLng);
+        if (dist <= radius) {
+            s_isNearTrack = true;
+            s_proximityTrack = track;
+            ESP_LOGI(TAG, "Near track: %s (%.0fm)", track->name, dist);
+
+            // Auto-select active track if none confirmed
+            if (!s_activeTrack.isValid() || !s_activeTrack.userConfirmed) {
+                setActiveTrack(track, 0);
+                s_activeTrack.detectionDistanceM = dist;
+                s_activeTrack.detectedAtMs = (unsigned long)(esp_timer_get_time() / 1000ULL);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool isNearAnyTrack() {
+    return s_isNearTrack;
+}
+
+const char* getNearTrackName() {
+    if (s_isNearTrack && s_proximityTrack != nullptr) {
+        return s_proximityTrack->name;
+    }
+    return nullptr;
 }
 
 // ============================================================

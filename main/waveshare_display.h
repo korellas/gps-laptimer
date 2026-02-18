@@ -52,6 +52,10 @@ bool readTouch(void);
 // Delta history reset
 void resetDeltaHistory(void);
 
+// PRE_TRACK mode (속도+시각 표시, 세션 시작 전)
+void setPreTrackMode(bool enabled, const char* trackName = nullptr);
+bool isPreTrackMode(void);
+
 // Startup screen
 void createStartupScreen(void);
 void updateStartupScreen(void);

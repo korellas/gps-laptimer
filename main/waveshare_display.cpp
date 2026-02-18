@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <ctime>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -172,6 +173,7 @@ enum class StartupState {
     MODE_SELECT,
     PHONE_PLATE,    // phone_overlay 활성
     BLE_OTA,        // BLE OTA 모드 (WiFi 해제, BLE 광고)
+    SETTINGS,       // WiFi SETTINGS 페이지 (OTA/설정 전용)
     WAIT_GPS,
     WAIT_SIM,
     TRANSITION,
@@ -186,8 +188,12 @@ static unsigned long s_startupTransitionStartMs = 0;
 static unsigned long s_fixAcquiredMs = 0;
 static char s_startupStatusCache[64] = "";
 
-// 모드 선택 상태 (0=SIMULATION, 1=GPS, 2=GPS STATUS)
+// 모드 선택 상태 (0=LAPTIMER, 1=EMULATION, 2=GPS STATUS, 3=BLE OTA, 4=SETTINGS)
 static int s_startupModeIndex = 0;
+
+// PRE_TRACK 모드 상태 (세션 시작 전 속도+시각 표시)
+static bool s_preTrackMode = false;
+static char s_preTrackName[64] = "";
 static bool s_gpsStatusOnlyMode = false;  // GPS STATUS 시작 모드 (랩타이머 비활성)
 static GPSMode s_selectedMode = GPSMode::GPS_HARDWARE;
 
@@ -196,6 +202,7 @@ enum DisplayPage {
     PAGE_DELTA,        // 중앙: 델타초,  우상단: 랩타임 (기본)
     PAGE_LAPTIME,      // 중앙: 랩타임,  우상단: 델타초
     PAGE_GPS_STATUS,   // GPS 진단 페이지 (위성, 좌표, Hz, UART 건강도)
+    PAGE_PRETRACK,     // PRE_TRACK: 속도 + 현재 시각 (세션 시작 전)
     PAGE_COUNT
 };
 static DisplayPage s_currentPage = PAGE_DELTA;
@@ -956,8 +963,64 @@ void initDisplay(void)
 // UPDATE FUNCTIONS
 // ============================================================
 
+// Forward declaration (정의는 GPS STATUS PAGE 섹션에 있음)
+static void applyPageVisibility(void);
+
+// ============================================================
+// PRE_TRACK MODE
+// ============================================================
+
+void setPreTrackMode(bool enabled, const char* trackName)
+{
+    s_preTrackMode = enabled;
+    if (trackName) {
+        strncpy(s_preTrackName, trackName, sizeof(s_preTrackName) - 1);
+        s_preTrackName[sizeof(s_preTrackName) - 1] = '\0';
+    } else {
+        s_preTrackName[0] = '\0';
+    }
+
+    DisplayPage newPage = enabled ? PAGE_PRETRACK : PAGE_DELTA;
+    if (s_currentPage != newPage) {
+        s_currentPage = newPage;
+        applyPageVisibility();
+    }
+}
+
+bool isPreTrackMode(void)
+{
+    return s_preTrackMode;
+}
+
 void updateLapData(void)
 {
+    // ─── PRE_TRACK 모드: 속도 + 현재 시각 표시 (세션 시작 전) ───
+    if (s_preTrackMode) {
+        // GPS 속도
+        float speedKmh = (float)gframe.speed / 1000.0f;
+        char speedBuf[16];
+        snprintf(speedBuf, sizeof(speedBuf), "%.0f km/h", speedKmh);
+
+        // 현재 시각 (HH:MM:SS)
+        char clockBuf[16] = "";
+        time_t now_t = time(nullptr);
+        struct tm tmInfo = {};
+        localtime_r(&now_t, &tmInfo);
+        snprintf(clockBuf, sizeof(clockBuf), "%02d:%02d:%02d",
+                 tmInfo.tm_hour, tmInfo.tm_min, tmInfo.tm_sec);
+
+        if (lvgl_lock(10)) {
+            if (lbl_delta)    lv_label_set_text(lbl_delta, speedBuf);
+            if (lbl_datetime) {
+                lv_label_set_text(lbl_datetime, clockBuf);
+                lv_obj_clear_flag(lbl_datetime, LV_OBJ_FLAG_HIDDEN);
+            }
+            lvgl_unlock();
+        }
+        lvalid = false;
+        return;
+    }
+
     // ═══ Phase 1: Data Preparation (mutex 불필요) ═══
     // 모든 연산/포맷팅을 먼저 수행하여 mutex 점유 시간 최소화
 
@@ -1520,6 +1583,10 @@ void updateStartupScreen(void)
                 lv_obj_set_style_text_color(startup_status_label,
                     lv_color_make(0x00, 0x88, 0xFF), 0);
                 lv_label_set_text(startup_status_label, "< BLE OTA >");
+            } else if (s_startupModeIndex == 4) {
+                lv_obj_set_style_text_color(startup_status_label,
+                    lv_color_make(0xFF, 0x88, 0x00), 0);
+                lv_label_set_text(startup_status_label, "< SETTINGS >");
             }
             // 힌트 표시
             lv_label_set_text(startup_hint_label, "swipe: change  /  tap: start");
@@ -1530,23 +1597,34 @@ void updateStartupScreen(void)
         break;
 
     case StartupState::MODE_SELECT: {
+        // GPS 자동 속도 감지 (기본 LAPTIMER 선택 상태에서 50km/h 초과 시 자동 진입)
+        if (s_startupModeIndex == 0 && updateUBloxGPS()) {
+            UBloxData ubx = getUBloxData();
+            if (ubx.valid && ubx.speedKmh > AUTO_ENTER_LAPTIMER_SPEED_KMH) {
+                ESP_LOGI(TAG, "Auto-enter LAPTIMER (%.1f km/h)", ubx.speedKmh);
+                gApp.currentGpsMode = GPSMode::GPS_HARDWARE;
+                s_startupTransitionStartMs = now;
+                s_startupState = StartupState::TRANSITION;
+                break;
+            }
+        }
+
         // LVGL 공유 터치 데이터로 제스처 감지 (I2C 충돌 없음)
         GestureResult gesture = detectGesture();
 
         if (gesture == GESTURE_SWIPE_LEFT || gesture == GESTURE_SWIPE_RIGHT) {
-            // 좌우 스와이프 → 4개 모드 순환 (LAPTIMER ↔ EMULATION ↔ GPS STATUS ↔ BLE OTA)
+            // 좌우 스와이프 → 5개 모드 순환 (LAPTIMER ↔ EMULATION ↔ GPS STATUS ↔ BLE OTA ↔ SETTINGS)
             if (gesture == GESTURE_SWIPE_LEFT) {
-                s_startupModeIndex = (s_startupModeIndex + 1) % 4;
+                s_startupModeIndex = (s_startupModeIndex + 1) % 5;
             } else {
-                s_startupModeIndex = (s_startupModeIndex + 3) % 4;
+                s_startupModeIndex = (s_startupModeIndex + 4) % 5;
             }
-            // 0=LAPTIMER(GPS), 1=EMULATION(SIM), 2=GPS STATUS(GPS), 3=BLE OTA(n/a)
+            // 0=LAPTIMER(GPS), 1=EMULATION(SIM), 2=GPS STATUS(GPS), 3=BLE OTA(n/a), 4=SETTINGS(n/a)
             if (s_startupModeIndex == 1) {
                 s_selectedMode = GPSMode::SIMULATION;
-            } else if (s_startupModeIndex != 3) {
+            } else if (s_startupModeIndex != 3 && s_startupModeIndex != 4) {
                 s_selectedMode = GPSMode::GPS_HARDWARE;
             }
-            // BLE OTA mode doesn't set s_selectedMode
 
             if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 if (s_startupModeIndex == 0) {
@@ -1565,6 +1643,10 @@ void updateStartupScreen(void)
                     lv_obj_set_style_text_color(startup_status_label,
                         lv_color_make(0x00, 0x88, 0xFF), 0);
                     lv_label_set_text(startup_status_label, "< BLE OTA >");
+                } else if (s_startupModeIndex == 4) {
+                    lv_obj_set_style_text_color(startup_status_label,
+                        lv_color_make(0xFF, 0x88, 0x00), 0);
+                    lv_label_set_text(startup_status_label, "< SETTINGS >");
                 }
                 xSemaphoreGive(lvgl_mutex);
             }
@@ -1581,10 +1663,10 @@ void updateStartupScreen(void)
             s_startupState = StartupState::PHONE_PLATE;
         } else if (gesture == GESTURE_TAP) {
             // 탭 → 모드 확정, 시작
-            // 0=LAPTIMER, 1=EMULATION, 2=GPS STATUS, 3=BLE OTA
-            const char* modeNames[] = {"LAPTIMER", "EMULATION", "GPS STATUS", "BLE OTA"};
+            // 0=LAPTIMER, 1=EMULATION, 2=GPS STATUS, 3=BLE OTA, 4=SETTINGS
+            const char* modeNames[] = {"LAPTIMER", "EMULATION", "GPS STATUS", "BLE OTA", "SETTINGS"};
             ESP_LOGI(TAG, "Mode selected: %s", modeNames[s_startupModeIndex]);
-            if (s_startupModeIndex != 3) {
+            if (s_startupModeIndex != 3 && s_startupModeIndex != 4) {
                 gApp.currentGpsMode = s_selectedMode;
             }
 
@@ -1596,29 +1678,34 @@ void updateStartupScreen(void)
                     lv_label_set_text(startup_status_label, "EMULATION");
                 } else if (s_startupModeIndex == 3) {
                     lv_label_set_text(startup_status_label, "BLE OTA");
+                } else if (s_startupModeIndex == 4) {
+                    lv_label_set_text(startup_status_label, "SETTINGS");
                 }
                 lvgl_unlock();
             }
 
             s_startupCreatedMs = now;  // 타이머 리셋
             if (s_startupModeIndex == 0) {
-                // LAPTIMER (실제 GPS)
-                enableGPSModule();
+                // LAPTIMER (실제 GPS) — GPS 이미 부팅 시 ON
                 s_startupState = StartupState::WAIT_GPS;
                 s_startupStatusCache[0] = '\0';
             } else if (s_startupModeIndex == 1) {
-                // EMULATION (시뮬레이션)
+                // EMULATION (시뮬레이션) — GPS OFF (배터리 절약)
+                disableGPSModule();
                 s_startupState = StartupState::WAIT_SIM;
             } else if (s_startupModeIndex == 2) {
                 // GPS STATUS → 진단 전용 모드 (랩타이머 비활성)
                 s_gpsStatusOnlyMode = true;
-                enableGPSModule();
                 s_currentPage = PAGE_GPS_STATUS;
                 s_startupTransitionStartMs = now;
                 s_startupState = StartupState::TRANSITION;
             } else if (s_startupModeIndex == 3) {
                 // BLE OTA 모드
                 s_startupState = StartupState::BLE_OTA;
+            } else if (s_startupModeIndex == 4) {
+                // SETTINGS → WiFi AP 시작
+                startWifiPortal();
+                s_startupState = StartupState::SETTINGS;
             }
         }
         break;
@@ -1723,6 +1810,51 @@ void updateStartupScreen(void)
         break;
     }
 
+    case StartupState::SETTINGS: {
+        // WiFi SETTINGS 페이지: SSID/IP 표시, 스와이프로 종료
+        static bool s_settingsInfoShown = false;
+        if (!s_settingsInfoShown) {
+            char infoBuf[96];
+            snprintf(infoBuf, sizeof(infoBuf), "WiFi: " WIFI_AP_SSID "  /  " WIFI_AP_IP_STR);
+            if (lvgl_lock(10)) {
+                lv_obj_set_style_text_color(startup_status_label,
+                    lv_color_make(0xFF, 0x88, 0x00), 0);
+                lv_label_set_text(startup_status_label, "SETTINGS");
+                lv_label_set_text(startup_hint_label, infoBuf);
+                lv_obj_clear_flag(startup_hint_label, LV_OBJ_FLAG_HIDDEN);
+                lvgl_unlock();
+            }
+            s_settingsInfoShown = true;
+        }
+
+        // OTA 진행 중이면 exit 차단
+        bool exitBlocked = (gApp.otaState == OTAState::RECEIVING
+                         || gApp.otaState == OTAState::VALIDATING
+                         || gApp.otaState == OTAState::COMPLETE);
+
+        // OTA 진행률 표시
+        if (gApp.otaState == OTAState::RECEIVING) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "OTA: %d%%  (do not exit)", (int)(gApp.otaProgress * 100));
+            if (lvgl_lock(10)) {
+                lv_label_set_text(startup_hint_label, buf);
+                lvgl_unlock();
+            }
+        }
+
+        GestureResult gesture = detectGesture();
+        if (gesture != GESTURE_NONE && !exitBlocked) {
+            stopWifiPortal();
+            s_settingsInfoShown = false;
+            if (lvgl_lock(10)) {
+                lv_obj_clear_flag(startup_overlay, LV_OBJ_FLAG_HIDDEN);
+                lvgl_unlock();
+            }
+            s_startupState = StartupState::INIT;
+        }
+        break;
+    }
+
     case StartupState::WAIT_SIM:
         if ((now - s_startupCreatedMs) >= STARTUP_SIM_DISPLAY_MS) {
             s_startupTransitionStartMs = now;
@@ -1822,9 +1954,6 @@ void updateStartupScreen(void)
         break;
     }
 }
-
-// Forward declaration (정의는 GPS STATUS PAGE 섹션)
-static void applyPageVisibility(void);
 
 void dismissStartupScreen(void)
 {
@@ -1926,20 +2055,30 @@ static char s_gpsStatusCache[GPS_STATUS_LINE_COUNT][GPS_STATUS_LINE_WIDTH] = {};
 static void applyPageVisibility(void) {
     if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
 
-    bool isGpsPage = (s_currentPage == PAGE_GPS_STATUS);
+    bool isGpsPage   = (s_currentPage == PAGE_GPS_STATUS);
+    bool isPreTrack  = (s_currentPage == PAGE_PRETRACK);
 
-    // 메인 UI 요소: GPS Status 페이지에서는 숨김
+    // 메인 UI 요소: GPS Status / PRE_TRACK 페이지에서는 대부분 숨김
     lv_obj_t *mainElements[] = {
         bar_bg, lbl_delta, lbl_lapnum, lbl_laptime, lbl_best, lbl_speed_delta
     };
     for (auto el : mainElements) {
         if (!el) continue;
-        if (isGpsPage) lv_obj_add_flag(el, LV_OBJ_FLAG_HIDDEN);
-        else           lv_obj_clear_flag(el, LV_OBJ_FLAG_HIDDEN);
+        if (isGpsPage) {
+            lv_obj_add_flag(el, LV_OBJ_FLAG_HIDDEN);
+        } else if (isPreTrack) {
+            // PRE_TRACK: 속도 표시를 위해 lbl_delta만 표시, 나머지 숨김
+            if (el == lbl_delta) lv_obj_clear_flag(el, LV_OBJ_FLAG_HIDDEN);
+            else                  lv_obj_add_flag(el, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(el, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     for (int i = 0; i < 3; i++) {
         if (!lbl_sector_deltas[i]) continue;
-        if (isGpsPage) lv_obj_add_flag(lbl_sector_deltas[i], LV_OBJ_FLAG_HIDDEN);
+        if (isGpsPage || isPreTrack) {
+            lv_obj_add_flag(lbl_sector_deltas[i], LV_OBJ_FLAG_HIDDEN);
+        }
         // 메인 페이지에서 섹터 표시 여부는 updateLapData()가 관리
     }
 
@@ -1948,6 +2087,12 @@ static void applyPageVisibility(void) {
         if (!gps_status_labels[i]) continue;
         if (isGpsPage) lv_obj_clear_flag(gps_status_labels[i], LV_OBJ_FLAG_HIDDEN);
         else           lv_obj_add_flag(gps_status_labels[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // PRE_TRACK: lbl_datetime 시계 표시
+    if (lbl_datetime) {
+        if (isPreTrack) lv_obj_clear_flag(lbl_datetime, LV_OBJ_FLAG_HIDDEN);
+        // 기타 페이지에서의 datetime 표시는 updateLapData()가 관리
     }
 
     xSemaphoreGive(lvgl_mutex);

@@ -5,6 +5,7 @@
  */
 
 #include "finish_line.h"
+#include "track_types.h"
 
 #include <algorithm>
 #include <cmath>
@@ -243,6 +244,69 @@ bool checkLineCrossing(double lat, double lng, float heading, unsigned long lapT
         s_crossingState.lastCrossingMs = now;
         s_crossingState.inDeadzone = true;
         ESP_LOGI(TAG, "*** FINISH LINE CROSSED ***");
+        return true;
+    }
+
+    return false;
+}
+
+bool setFinishLineFromDefinition(const FinishLineDefinition& def) {
+    if (!def.isConfigured()) {
+        ESP_LOGW(TAG, "Finish line definition not configured");
+        return false;
+    }
+
+    s_finishLine.lat1 = def.lat1;
+    s_finishLine.lng1 = def.lng1;
+    s_finishLine.lat2 = def.lat2;
+    s_finishLine.lng2 = def.lng2;
+    s_finishLine.validBearingMin = (uint16_t)def.validHeadingMin;
+    s_finishLine.validBearingMax = (uint16_t)def.validHeadingMax;
+    s_finishLine.configured = true;
+
+    resetCrossingState();
+
+    ESP_LOGI(TAG, "Finish line set from track definition (%.6f,%.6f → %.6f,%.6f)",
+             def.lat1, def.lng1, def.lat2, def.lng2);
+    return true;
+}
+
+bool checkFirstLineCrossing(double lat, double lng, float heading) {
+    // 최초 스타트라인 통과 감지: MIN_LAP_TIME / deadzone 체크 없이 교차만 검사
+    // 세션 시작(startSession) 직전에만 사용
+    if (!s_finishLine.configured) {
+        return false;
+    }
+
+    if (!isBearingValid(heading, s_finishLine.validBearingMin, s_finishLine.validBearingMax)) {
+        s_crossingState.prevLat = lat;
+        s_crossingState.prevLng = lng;
+        s_crossingState.hasPrevPoint = true;
+        return false;
+    }
+
+    if (!s_crossingState.hasPrevPoint) {
+        s_crossingState.prevLat = lat;
+        s_crossingState.prevLng = lng;
+        s_crossingState.hasPrevPoint = true;
+        return false;
+    }
+
+    bool crossed = segmentsIntersect(
+        s_crossingState.prevLat, s_crossingState.prevLng,
+        lat, lng,
+        s_finishLine.lat1, s_finishLine.lng1,
+        s_finishLine.lat2, s_finishLine.lng2
+    );
+
+    s_crossingState.prevLat = lat;
+    s_crossingState.prevLng = lng;
+
+    if (crossed) {
+        unsigned long now = (unsigned long)(esp_timer_get_time() / 1000ULL);
+        s_crossingState.lastCrossingMs = now;
+        s_crossingState.inDeadzone = true;
+        ESP_LOGI(TAG, "*** SESSION START: first line crossing ***");
         return true;
     }
 

@@ -9,7 +9,8 @@
 
 #include "config.h"  // For MIN_LAP_TIME_MS
 
-struct TrackTemplate;  // Forward declaration
+struct TrackTemplate;       // Forward declaration
+struct FinishLineDefinition; // Forward declaration (track_types.h)
 
 // ============================================================
 // Configuration
@@ -61,6 +62,12 @@ void clearFinishLine();
 
 // Detection
 bool checkLineCrossing(double lat, double lng, float heading, unsigned long lapTimeMs);
+
+// 최초 스타트라인 통과 감지 (MIN_LAP_TIME / deadzone 체크 없음 — 세션 시작 전용)
+bool checkFirstLineCrossing(double lat, double lng, float heading);
+
+// 트랙 정의에서 피니시라인 설정 (SPIFFS 미설정 시 폴백)
+bool setFinishLineFromDefinition(const FinishLineDefinition& def);
 
 // State access
 bool isFinishLineConfigured();

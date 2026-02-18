@@ -407,7 +407,7 @@ static esp_err_t handleCaptiveCheck(httpd_req_t *req)
 {
     updateActivity();
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Location", "http://" WIFI_AP_IP_STR "/");
     return httpd_resp_send(req, NULL, 0);
 }
 
@@ -638,8 +638,8 @@ static void initWifiDriver(void)
 static void startSoftAP(void)
 {
     wifi_config_t wifi_config = {};
-    strcpy((char *)wifi_config.ap.ssid, "LAPTIMER");
-    wifi_config.ap.ssid_len = strlen("LAPTIMER");
+    strcpy((char *)wifi_config.ap.ssid, WIFI_AP_SSID);
+    wifi_config.ap.ssid_len = strlen(WIFI_AP_SSID);
     wifi_config.ap.channel = 1;
     // Single-user OTA portal: allow only one station to minimize AP footprint.
     wifi_config.ap.max_connection = 1;
@@ -667,7 +667,7 @@ static void startSoftAP(void)
     // WiFi 전력절약 끄기 (DHCP 패킷 드롭 방지)
     esp_wifi_set_ps(WIFI_PS_NONE);
 
-    ESP_LOGI(TAG, "SoftAP started: SSID=LAPTIMER (open), int_free=%lu, int_largest=%lu",
+    ESP_LOGI(TAG, "SoftAP started: SSID=" WIFI_AP_SSID " (open), int_free=%lu, int_largest=%lu",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
@@ -783,7 +783,7 @@ void startWifiPortal(void)
     updateActivity();
 
     s_wifiActive = true;
-    ESP_LOGI(TAG, "WiFi portal ready: http://192.168.4.1");
+    ESP_LOGI(TAG, "WiFi portal ready: http://" WIFI_AP_IP_STR);
 }
 
 void stopWifiPortal(void)

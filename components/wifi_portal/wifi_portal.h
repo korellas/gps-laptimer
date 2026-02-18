@@ -9,6 +9,10 @@
 #ifndef WIFI_PORTAL_H
 #define WIFI_PORTAL_H
 
+// SoftAP identity — used by both wifi_portal.cpp and the display layer
+#define WIFI_AP_SSID    "LAPTIMER"
+#define WIFI_AP_IP_STR  "192.168.4.1"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

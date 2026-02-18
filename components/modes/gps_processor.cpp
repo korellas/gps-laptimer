@@ -42,12 +42,12 @@ extern void onLapComplete(unsigned long lapTimeMs);
 
 static GPSProcessorState gpsState;
 
-// 에버랜드 섹터 경계 (SSOT: builtin_tracks.h → everland::SECTOR_BOUNDARIES)
-static const SectorBoundaryPoint s_sectorBoundaries[] = {
-    {37.2974004, 127.2175125},   // S1→S2
-    {37.2961782, 127.2138076},   // S2→S3
-};
-static constexpr int SECTOR_BOUNDARY_COUNT = sizeof(s_sectorBoundaries) / sizeof(s_sectorBoundaries[0]);
+// 세션 상태머신
+static GPSSessionState s_sessionState = GPSSessionState::PRE_TRACK;
+
+// 동적 섹터 경계 (활성 트랙에서 setupSectorBoundariesFromActiveTrack()으로 설정)
+static SectorBoundaryPoint s_sectorBoundaries[MAX_SECTORS_PER_LAYOUT];
+static int s_sectorBoundaryCount = 0;
 
 // ============================================================
 // HELPER: millis()
@@ -55,6 +55,75 @@ static constexpr int SECTOR_BOUNDARY_COUNT = sizeof(s_sectorBoundaries) / sizeof
 
 static inline unsigned long gpsMillis() {
     return (unsigned long)(esp_timer_get_time() / 1000ULL);
+}
+
+// ============================================================
+// HELPER: 활성 트랙에서 섹터 경계 설정
+// ============================================================
+
+static void setupSectorBoundariesFromActiveTrack() {
+    s_sectorBoundaryCount = 0;
+
+    const ActiveTrack& active = getActiveTrackConst();
+    if (!active.isValid() || !active.layout->hasSectors()) {
+        ESP_LOGI(TAG, "No active track/sectors for boundary setup");
+        return;
+    }
+
+    int sectorCount = active.layout->sectorCount;
+    // Sector boundaries are between sectors, so at most (sectorCount - 1) boundaries
+    for (int i = 0; i < sectorCount - 1 && s_sectorBoundaryCount < MAX_SECTORS_PER_LAYOUT; i++) {
+        const Sector* sec = active.layout->getSector(i);
+        if (!sec) continue;
+
+        if (sec->usesBoundaryLine()) {
+            // Midpoint of boundary line as the representative point
+            s_sectorBoundaries[s_sectorBoundaryCount].lat =
+                (sec->boundaryLat1 + sec->boundaryLat2) / 2.0;
+            s_sectorBoundaries[s_sectorBoundaryCount].lng =
+                (sec->boundaryLng1 + sec->boundaryLng2) / 2.0;
+            s_sectorBoundaryCount++;
+        }
+        // Distance-based sectors don't need explicit boundary points here
+        // (handled by updateSectorDistancesFromReference)
+    }
+
+    ESP_LOGI(TAG, "Sector boundaries: %d points from track '%s'",
+             s_sectorBoundaryCount, active.track->id);
+}
+
+// ============================================================
+// HELPER: 세션 시작 (스타트라인 통과 시)
+// ============================================================
+
+static void startSession(unsigned long nowMs) {
+    gpsState.lapStartMs = nowMs;
+    gpsState.lapStarted = true;
+
+    startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber);
+
+    // 동적 섹터 경계 설정
+    setupSectorBoundariesFromActiveTrack();
+
+    // 섹터 타이밍 초기화 (레퍼런스 거리 계산 전후 공통)
+    resetSectorTiming();
+
+    // 레퍼런스 랩이 있으면 섹터 경계 거리 계산
+    if (gApp.hasValidReferenceLap && !gApp.referenceLap.points.empty()
+            && s_sectorBoundaryCount > 0) {
+        updateSectorDistancesFromReference(
+            gApp.referenceLap.points.data(),
+            gApp.referenceLap.cumulativeDistances.data(),
+            (int)gApp.referenceLap.points.size(),
+            s_sectorBoundaries, s_sectorBoundaryCount);
+    }
+
+    s_sessionState = GPSSessionState::SESSION_ACTIVE;
+
+    // PRE_TRACK 디스플레이 해제
+    setPreTrackMode(false, nullptr);
+
+    ESP_LOGI(TAG, "Session started (lapStartMs=%lu)", nowMs);
 }
 
 // ============================================================
@@ -67,17 +136,15 @@ static void initializeGPSProcessor() {
 }
 
 void initializeGPSMode() {
-    // GPS 모듈 활성화 (이미 활성화된 경우 no-op)
+    // GPS 모듈 활성화 (부팅 시 이미 ON — no-op)
     enableGPSModule();
 
     initializeGPSProcessor();
 
-    // 트랙 활성화 (시뮬레이션과 동일)
-    if (setActiveTrackById("everland", "full")) {
-        ESP_LOGI(TAG, "Track activated: everland/full");
-    } else {
-        ESP_LOGW(TAG, "Track activation failed");
-    }
+    // 세션 상태 초기화 (트랙 감지는 processRealGPS()의 PRE_TRACK 상태에서)
+    s_sessionState = GPSSessionState::PRE_TRACK;
+    s_sectorBoundaryCount = 0;
+    resetTrackManager();
 
     // 섹터 타이밍 초기화
     initSectorTiming();
@@ -88,23 +155,14 @@ void initializeGPSMode() {
     // Dead Reckoning 초기화
     initDeadReckoning();
 
-    // 레퍼런스 랩이 있으면 섹터 경계 거리 계산
-    if (gApp.hasValidReferenceLap && !gApp.referenceLap.points.empty()) {
-        updateSectorDistancesFromReference(
-            gApp.referenceLap.points.data(),
-            gApp.referenceLap.cumulativeDistances.data(),
-            (int)gApp.referenceLap.points.size(),
-            s_sectorBoundaries, SECTOR_BOUNDARY_COUNT);
-        resetSectorTiming();
-        ESP_LOGI(TAG, "Sector distances calculated from reference (%d pts)",
-                 (int)gApp.referenceLap.points.size());
-    }
-
     // 완료 표시 초기화
     lframe.lastCompletedLapMs = 0;
     lframe.lapCompleteDisplayEndMs = 0;
 
-    ESP_LOGI(TAG, "GPS mode initialized (ref=%s)",
+    // PRE_TRACK 디스플레이 진입
+    setPreTrackMode(true, nullptr);
+
+    ESP_LOGI(TAG, "GPS mode initialized → PRE_TRACK (ref=%s)",
              gApp.hasValidReferenceLap ? "YES" : "NO");
 }
 
@@ -114,20 +172,27 @@ void resetRealGPS() {
     gpsState.lastValidGpsMs = 0;
     gpsState.gpsSignalLost = false;
 
+    s_sessionState = GPSSessionState::PRE_TRACK;
+    s_sectorBoundaryCount = 0;
+
     resetCrossingState();
     cancelRecording();
     resetSectorTiming();
     resetGPSFilter();
     resetDeadReckoning();
+    resetTrackManager();
 
-    ESP_LOGI(TAG, "GPS mode reset");
+    setPreTrackMode(true, nullptr);
+
+    ESP_LOGI(TAG, "GPS mode reset → PRE_TRACK");
 }
 
 void processRealGPS() {
     unsigned long now = gpsMillis();
 
-    // ─── GPS 신호 타임아웃 체크 ───
-    if (gpsState.lapStarted && gpsState.lastValidGpsMs > 0) {
+    // ─── GPS 신호 타임아웃 체크 (SESSION_ACTIVE에서만) ───
+    if (s_sessionState == GPSSessionState::SESSION_ACTIVE &&
+        gpsState.lapStarted && gpsState.lastValidGpsMs > 0) {
         if ((now - gpsState.lastValidGpsMs) > GPS_TIMEOUT_MS) {
             if (!gpsState.gpsSignalLost) {
                 gpsState.gpsSignalLost = true;
@@ -152,117 +217,168 @@ void processRealGPS() {
                 ESP_LOGI(TAG, "GPS signal recovered");
             }
 
-            // Dead Reckoning 활성 중이면 중단
-            if (isDeadReckoningActive()) {
-                stopDeadReckoning();
-            }
+            if (isDeadReckoningActive()) stopDeadReckoning();
 
-            // ─── GPSPoint 생성 (Phase 4: isValid 수정) ───
+            // ─── GPSPoint 생성 ───
             GPSPoint point;
-            point.set(ubx.lat, ubx.lon);  // initialized = true
+            point.set(ubx.lat, ubx.lon);
             point.speedKmh = ubx.speedKmh;
             point.headingDeg = ubx.headingDeg;
             point.gpsTimeMs = ubx.iTOW;
 
-            // 첫 유효 데이터에서 랩 시작
-            if (!gpsState.lapStarted) {
-                gpsState.lapStartMs = now;
-                gpsState.lapStarted = true;
-                startRecordingLap(gApp.currentSessionNumber, gApp.currentLapNumber);
-                ESP_LOGI(TAG, "Lap started (sat=%d)", ubx.satellites);
-            }
-
-            unsigned long lapTimeMs = now - gpsState.lapStartMs;
-            point.lapTimeMs = lapTimeMs;
-
-            // ─── GPS 필터 (Phase 8) ───
+            // ─── GPS 필터 ───
             FilteredGPSPoint filtered = filterGPSPoint(point, now);
-            if (filtered.wasSpikeFiltered) {
-                // 스파이크 감지 — 필터된 좌표 사용 (마지막 유효 위치)
-                point.lat = filtered.point.lat;
-                point.lng = filtered.point.lng;
-                // 속도/heading은 원본 유지
-            } else if (filtered.isValid) {
-                // 정상 — 스무딩된 좌표 사용
+            if (filtered.wasSpikeFiltered || filtered.isValid) {
                 point.lat = filtered.point.lat;
                 point.lng = filtered.point.lng;
             }
 
-            // 포인트 기록
-            if (isRecording()) {
-                addPointToRecording(point.lat, point.lng, lapTimeMs,
-                                    point.speedKmh, point.headingDeg);
-            }
+            // ═══ 세션 상태머신 ═══
+            switch (s_sessionState) {
 
-            // ─── 피니시라인 감지 ───
-            if (lapTimeMs > MIN_LAP_TIME_MS) {
-                if (checkLineCrossing(point.lat, point.lng, point.headingDeg, lapTimeMs)) {
-                    onLapComplete(lapTimeMs);
-                    gpsState.lapStartMs = now;
-                    ESP_LOGI(TAG, "New lap started");
+            case GPSSessionState::PRE_TRACK: {
+                // 트랙 근접 감지
+                bool near = updateTrackProximity(point.lat, point.lng);
+                if (near) {
+                    const char* trackName = getNearTrackName();
+                    ESP_LOGI(TAG, "PRE_TRACK → NEAR_TRACK (%s)",
+                             trackName ? trackName : "?");
+
+                    // 피니시라인 설정: SPIFFS 미설정 시 트랙 정의에서 로드
+                    if (!isFinishLineConfigured()) {
+                        const FinishLineDefinition* fl =
+                            getActiveTrackConst().getFinishLineDefinition();
+                        if (fl) setFinishLineFromDefinition(*fl);
+                    }
+
+                    s_sessionState = GPSSessionState::NEAR_TRACK;
+                    setPreTrackMode(true, trackName);
                 }
+                // PRE_TRACK: 디스플레이는 setPreTrackMode(true)가 처리
+                gApp.previousPoint = gApp.currentPoint;
+                gApp.currentPoint = point;
+                gotNewData = true;
+                break;
             }
 
-            // 상태 업데이트
-            gApp.previousPoint = gApp.currentPoint;
-            gApp.currentPoint = point;
+            case GPSSessionState::NEAR_TRACK: {
+                // 근접 이탈 체크 (히스테리시스)
+                bool stillNear = updateTrackProximity(point.lat, point.lng);
+                if (!stillNear) {
+                    ESP_LOGI(TAG, "NEAR_TRACK → PRE_TRACK (left proximity)");
+                    s_sessionState = GPSSessionState::PRE_TRACK;
+                    setPreTrackMode(true, nullptr);
+                    gApp.previousPoint = gApp.currentPoint;
+                    gApp.currentPoint = point;
+                    gotNewData = true;
+                    break;
+                }
 
-            // ─── 델타 계산 ───
-            if (gApp.hasValidReferenceLap) {
-                gApp.currentDelta = calculateDelta(point, gApp.referenceLap, &gApp.previousPoint);
-
-                // ─── 섹터 타이밍 (Phase 5) ───
-                if (gApp.currentDelta.trackDistanceM >= 0) {
-                    int completedSector = checkSectorTransitionByDistance(
-                        gApp.currentDelta.trackDistanceM);
-                    if (completedSector >= 0) {
-                        onSectorComplete(completedSector, lapTimeMs,
-                                        gApp.currentDelta.deltaSeconds);
-                        const CurrentSectorTiming& st = getCurrentSectorTiming();
-                        int nextSector = completedSector + 1;
-                        if (nextSector < st.totalSectors) {
-                            onSectorEntry(nextSector, lapTimeMs);
+                // SESSION_START_MIN_SPEED_KMH 이상에서 스타트라인 통과 감지
+                if (point.speedKmh >= SESSION_START_MIN_SPEED_KMH) {
+                    if (checkFirstLineCrossing(point.lat, point.lng, point.headingDeg)) {
+                        startSession(now);
+                        // SESSION_ACTIVE로 전환됨 — lapStartMs는 startSession()이 설정
+                        unsigned long lapTimeMs = 0;
+                        point.lapTimeMs = lapTimeMs;
+                        gApp.previousPoint = gApp.currentPoint;
+                        gApp.currentPoint = point;
+                        if (isRecording()) {
+                            addPointToRecording(point.lat, point.lng, lapTimeMs,
+                                                point.speedKmh, point.headingDeg);
                         }
+                        gotNewData = true;
+                        break;
                     }
                 }
-            } else {
-                gApp.currentDelta.clear();
+
+                // NEAR_TRACK: 속도+시각 표시 유지 (PRE_TRACK 디스플레이)
+                gApp.previousPoint = gApp.currentPoint;
+                gApp.currentPoint = point;
+                gotNewData = true;
+                break;
             }
 
-            gotNewData = true;
+            case GPSSessionState::SESSION_ACTIVE: {
+                unsigned long lapTimeMs = now - gpsState.lapStartMs;
+                point.lapTimeMs = lapTimeMs;
+
+                // 포인트 기록
+                if (isRecording()) {
+                    addPointToRecording(point.lat, point.lng, lapTimeMs,
+                                        point.speedKmh, point.headingDeg);
+                }
+
+                // ─── 피니시라인 감지 ───
+                if (lapTimeMs > MIN_LAP_TIME_MS) {
+                    if (checkLineCrossing(point.lat, point.lng, point.headingDeg, lapTimeMs)) {
+                        onLapComplete(lapTimeMs);
+                        gpsState.lapStartMs = now;
+                        ESP_LOGI(TAG, "New lap started");
+                    }
+                }
+
+                // 상태 업데이트
+                gApp.previousPoint = gApp.currentPoint;
+                gApp.currentPoint = point;
+
+                // ─── 델타 계산 ───
+                if (gApp.hasValidReferenceLap) {
+                    gApp.currentDelta = calculateDelta(point, gApp.referenceLap,
+                                                       &gApp.previousPoint);
+                    // ─── 섹터 타이밍 ───
+                    if (gApp.currentDelta.trackDistanceM >= 0) {
+                        int completedSector = checkSectorTransitionByDistance(
+                            gApp.currentDelta.trackDistanceM);
+                        if (completedSector >= 0) {
+                            onSectorComplete(completedSector, lapTimeMs,
+                                            gApp.currentDelta.deltaSeconds);
+                            const CurrentSectorTiming& st = getCurrentSectorTiming();
+                            int nextSector = completedSector + 1;
+                            if (nextSector < st.totalSectors) {
+                                onSectorEntry(nextSector, lapTimeMs);
+                            }
+                        }
+                    }
+                } else {
+                    gApp.currentDelta.clear();
+                }
+
+                gotNewData = true;
+                break;
+            }
+            } // end switch
         }
     }
 
-    // ─── Dead Reckoning (Phase 9) ───
-    if (!gotNewData && gpsState.lapStarted && gpsState.lastValidGpsMs > 0) {
-        unsigned long elapsed = now - gpsState.lastValidGpsMs;
+    // ─── Dead Reckoning (SESSION_ACTIVE에서만) ───
+    if (s_sessionState == GPSSessionState::SESSION_ACTIVE) {
+        if (!gotNewData && gpsState.lapStarted && gpsState.lastValidGpsMs > 0) {
+            unsigned long elapsed = now - gpsState.lastValidGpsMs;
 
-        // GPS가 200ms 이상 두절 시 DR 시작
-        if (elapsed > 200 && !isDeadReckoningActive() &&
-            gApp.currentPoint.speedKmh >= MIN_DEAD_RECKONING_SPEED_KMH) {
-            startDeadReckoning(gApp.currentPoint,
-                              gApp.currentPoint.speedKmh,
-                              gApp.currentPoint.headingDeg, now);
+            if (elapsed > DEAD_RECKONING_ACTIVATION_DELAY_MS && !isDeadReckoningActive() &&
+                gApp.currentPoint.speedKmh >= MIN_DEAD_RECKONING_SPEED_KMH) {
+                startDeadReckoning(gApp.currentPoint,
+                                  gApp.currentPoint.speedKmh,
+                                  gApp.currentPoint.headingDeg, now);
+            }
+
+            if (isDeadReckoningActive() && !isDeadReckoningExpired()) {
+                GPSPoint estimated = updateDeadReckoning(now);
+                unsigned long lapTimeMs = now - gpsState.lapStartMs;
+                estimated.lapTimeMs = lapTimeMs;
+                updateDisplayData(estimated, gApp.currentDelta, lapTimeMs,
+                                gApp.currentDelta.refTimeSec);
+                return;
+            }
         }
 
-        // DR 활성 중이면 추정 위치로 디스플레이 업데이트
-        if (isDeadReckoningActive() && !isDeadReckoningExpired()) {
-            GPSPoint estimated = updateDeadReckoning(now);
-            unsigned long lapTimeMs = now - gpsState.lapStartMs;
-            estimated.lapTimeMs = lapTimeMs;
-            updateDisplayData(estimated, gApp.currentDelta, lapTimeMs,
-                            gApp.currentDelta.refTimeSec);
-            return;  // DR 중에는 아래 일반 업데이트 스킵
-        }
-    }
-
-    // ─── 디스플레이 연속 업데이트 (Phase 6) ───
-    // GPS fix 여부와 무관하게 디스플레이 갱신 (fix 없어도 화면 멈춤 방지)
-    {
+        // ─── 디스플레이 연속 업데이트 ───
         unsigned long lapTimeMs = gpsState.lapStarted ? (now - gpsState.lapStartMs) : 0;
         updateDisplayData(gApp.currentPoint, gApp.currentDelta,
                          lapTimeMs, gApp.currentDelta.refTimeSec);
     }
+    // PRE_TRACK / NEAR_TRACK: updateLapData()가 setPreTrackMode로 처리
 }
 
 // ============================================================
@@ -301,5 +417,13 @@ const SectorBoundaryPoint* getGPSSectorBoundaries() {
 }
 
 int getGPSSectorBoundaryCount() {
-    return SECTOR_BOUNDARY_COUNT;
+    return s_sectorBoundaryCount;
+}
+
+GPSSessionState getGPSSessionState() {
+    return s_sessionState;
+}
+
+bool isGPSPreSession() {
+    return s_sessionState != GPSSessionState::SESSION_ACTIVE;
 }

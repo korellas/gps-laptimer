@@ -137,6 +137,27 @@ constexpr unsigned long TRACK_DETECTION_INTERVAL_MS = 1000;
 // Minimum GPS samples before attempting track detection
 constexpr int MIN_SAMPLES_FOR_TRACK_DETECTION = 5;
 
+// Hysteresis factor for proximity exit: must move to detectionRadiusM × factor
+// to leave "near track" state (prevents flickering at boundary)
+constexpr float TRACK_PROXIMITY_HYSTERESIS_FACTOR = 1.5f;
+
+// Approximate meters per degree of latitude (used for bounding box pre-filter)
+// 1° lat ≈ 111.32 km at all latitudes
+constexpr double METERS_PER_DEG_LAT = 111320.0;
+
+// ============================================================
+// SESSION START CONDITIONS
+// ============================================================
+
+// Minimum speed to automatically enter LAPTIMER mode from start screen
+constexpr float AUTO_ENTER_LAPTIMER_SPEED_KMH = 50.0f;
+
+// Minimum speed required at finish line crossing to start a new session
+constexpr float SESSION_START_MIN_SPEED_KMH = 60.0f;
+
+// Delay after GPS signal loss before activating dead reckoning (ms)
+constexpr unsigned long DEAD_RECKONING_ACTIVATION_DELAY_MS = 200;
+
 // ============================================================
 // SECTOR TIMING
 // ============================================================

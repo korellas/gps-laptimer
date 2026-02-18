@@ -1,8 +1,8 @@
 /**
  * @file gps_processor.h
  * @brief GPS Hardware mode for GPS Lap Timer
- * @version 1.0
- * 
+ * @version 2.1
+ *
  * Handles real GPS data from u-blox module for actual lap timing.
  * This is the primary production mode for live track use.
  */
@@ -11,6 +11,24 @@
 #define GPS_PROCESSOR_H
 
 #include <cstdint>
+
+// ============================================================
+// GPS SESSION STATE MACHINE
+// ============================================================
+
+/**
+ * @brief GPS session lifecycle states
+ *
+ * PRE_TRACK  → NEAR_TRACK (proximity detected)
+ * NEAR_TRACK → SESSION_ACTIVE (finish line crossed at 60+ km/h)
+ * NEAR_TRACK → PRE_TRACK (left track proximity)
+ * SESSION_ACTIVE: continuous lap counting, no return to NEAR_TRACK
+ */
+enum class GPSSessionState {
+    PRE_TRACK,      // 트랙 근처 아님 — 속도+시각만 표시
+    NEAR_TRACK,     // 트랙 감지됨, 60km/h 스타트라인 통과 대기
+    SESSION_ACTIVE  // 레이싱 중 (연속 랩 타이밍)
+};
 
 // ============================================================
 // GPS PROCESSOR STATE
@@ -79,6 +97,16 @@ void resetRealGPS();
  * @return millis() value of last valid GPS update
  */
 unsigned long getLastValidGpsTimeMs();
+
+/**
+ * @brief Get current GPS session state
+ */
+GPSSessionState getGPSSessionState();
+
+/**
+ * @brief Check if GPS mode is in PRE_TRACK or NEAR_TRACK (not yet in session)
+ */
+bool isGPSPreSession();
 
 /**
  * @brief Get current GPS processor state (read-only)

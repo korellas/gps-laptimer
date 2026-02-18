@@ -236,6 +236,36 @@ bool hasBuiltinReference();
 bool getBuiltinReferenceInfo(int& outStartIdx, int& outEndIdx, uint32_t& outTimeMs);
 
 // ============================================================
+// PROXIMITY DETECTION (with hysteresis)
+// ============================================================
+
+/**
+ * @brief Update track proximity state using 2-stage detection + hysteresis
+ *
+ * Stage 1: Bounding box pre-filter (no trig, very cheap)
+ * Stage 2: Haversine distance (only when Stage 1 passes)
+ * Hysteresis: enter at 1× detectionRadiusM, exit at 1.5× detectionRadiusM
+ *
+ * Also auto-sets active track when proximity is first detected.
+ *
+ * @param lat Current latitude
+ * @param lng Current longitude
+ * @return true if within proximity zone of any track
+ */
+bool updateTrackProximity(double lat, double lng);
+
+/**
+ * @brief Check if currently near any track (cached from last updateTrackProximity)
+ * @return true if within proximity zone
+ */
+bool isNearAnyTrack();
+
+/**
+ * @brief Get name of the track currently in proximity (or nullptr)
+ */
+const char* getNearTrackName();
+
+// ============================================================
 // TRACK LISTING
 // ============================================================
 

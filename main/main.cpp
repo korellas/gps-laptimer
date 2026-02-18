@@ -717,11 +717,9 @@ static void app_init(void) {
     ESP_LOGI(TAG, "Session: %u", gApp.currentSessionNumber);
     LOG_INTRAM("pre-wifi");
 
-    // WiFi 초기화 + 시작 (시작 화면 동안 ON, 레이스 진입 시 클라이언트 없으면 OFF)
+    // WiFi 초기화 (SETTINGS 페이지에서만 시작)
     initWifiPortal();
     LOG_INTRAM("wifi-init");
-    startWifiPortal();
-    LOG_INTRAM("wifi-started");
 
     // Initialize finish line detection
     initFinishLine();
@@ -756,7 +754,7 @@ static void app_init(void) {
     // Initialize serial command handler
     initSerialCommands();
 
-    // GPS 모듈 전원 핀 초기화 (기본: OFF — GPS 모드/GPS Status 진입 시 활성화)
+    // GPS 모듈 전원 핀 초기화 후 즉시 활성화 (부팅 즉시 위성 수신 시작)
     gpio_config_t gps_en_gpio = {};
     gps_en_gpio.intr_type = GPIO_INTR_DISABLE;
     gps_en_gpio.mode = GPIO_MODE_OUTPUT;
@@ -764,8 +762,8 @@ static void app_init(void) {
     gps_en_gpio.pull_up_en = GPIO_PULLUP_DISABLE;
     gps_en_gpio.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&gps_en_gpio);
-    gpio_set_level((gpio_num_t)GPS_ENABLE_PIN, 0);
-    ESP_LOGI(TAG, "GPS module: OFF (deferred init)");
+    enableGPSModule();
+    ESP_LOGI(TAG, "GPS module: ON (boot-time init)");
 
     // 모드 초기화는 시작 화면에서 모드 선택 후 수행
     resetDeltaHistory();
@@ -844,17 +842,6 @@ static void main_task(void *pvParameters) {
                         initializeSimulation();
                     } else {
                         initializeGPSMode();
-                    }
-                    // WiFi: 접속 클라이언트 없으면 종료 (전력 절약)
-                    if (isWifiPortalActive()) {
-                        wifi_sta_list_t sta_list;
-                        esp_wifi_ap_get_sta_list(&sta_list);
-                        if (sta_list.num == 0) {
-                            stopWifiPortal();
-                            ESP_LOGI(TAG, "WiFi OFF (no clients at race start)");
-                        } else {
-                            ESP_LOGI(TAG, "WiFi ON (keeping %d client(s))", sta_list.num);
-                        }
                     }
                     modeInitialized = true;
                 }
