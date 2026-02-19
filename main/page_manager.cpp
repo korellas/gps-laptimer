@@ -287,15 +287,17 @@ void PageManager::checkIdleTimeouts()
     uint32_t now = pm_millis();
     uint32_t idleMs = now - m_lastActivityMs;
 
-    // Auto power-off (longer timeout)
-    if (idleMs >= AUTO_POWEROFF_TIMEOUT_MS) {
+    // Auto power-off (longer timeout) — runtime-configurable via gApp.poweroffMin
+    uint32_t poweroffMs = (uint32_t)gApp.poweroffMin * 60000UL;
+    if (idleMs >= poweroffMs) {
         ESP_LOGI(TAG, "Auto power-off: idle %lu ms", (unsigned long)idleMs);
         systemPowerOff();
         return;
     }
 
-    // Screen off (shorter timeout)
-    if (!m_screenOff && idleMs >= SCREEN_OFF_TIMEOUT_MS) {
+    // Screen off (shorter timeout) — runtime-configurable via gApp.screenOffMin
+    uint32_t screenOffMs = (uint32_t)gApp.screenOffMin * 60000UL;
+    if (!m_screenOff && idleMs >= screenOffMs) {
         setBacklight(false);
         m_screenOff = true;
         ESP_LOGI(TAG, "Screen off: idle %lu ms", (unsigned long)idleMs);

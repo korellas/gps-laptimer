@@ -192,6 +192,8 @@ static esp_err_t handleGetSettings(httpd_req_t *req)
     updateActivity();
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "phone", gApp.phoneNumber);
+    cJSON_AddNumberToObject(root, "screen_off_min", gApp.screenOffMin);
+    cJSON_AddNumberToObject(root, "poweroff_min",   gApp.poweroffMin);
     char *json = cJSON_PrintUnformatted(root);
 
     httpd_resp_set_type(req, "application/json");
@@ -226,6 +228,19 @@ static esp_err_t handlePostSettings(httpd_req_t *req)
         gApp.phoneNumber[sizeof(gApp.phoneNumber) - 1] = '\0';
         ESP_LOGI(TAG, "Phone number set: %s", gApp.phoneNumber);
     }
+
+    cJSON *screenOff = cJSON_GetObjectItem(root, "screen_off_min");
+    if (screenOff && cJSON_IsNumber(screenOff)) {
+        int v = (int)screenOff->valuedouble;
+        if (v >= 1 && v <= 60) gApp.screenOffMin = (uint16_t)v;
+    }
+
+    cJSON *poweroff = cJSON_GetObjectItem(root, "poweroff_min");
+    if (poweroff && cJSON_IsNumber(poweroff)) {
+        int v = (int)poweroff->valuedouble;
+        if (v >= 5 && v <= 180) gApp.poweroffMin = (uint16_t)v;
+    }
+
     cJSON_Delete(root);
 
     saveSettings();
@@ -873,8 +888,21 @@ void loadSettings(void)
         gApp.phoneNumber[sizeof(gApp.phoneNumber) - 1] = '\0';
     }
 
+    cJSON *screenOff = cJSON_GetObjectItem(root, "screen_off_min");
+    if (screenOff && cJSON_IsNumber(screenOff)) {
+        int v = (int)screenOff->valuedouble;
+        if (v >= 1 && v <= 60) gApp.screenOffMin = (uint16_t)v;
+    }
+
+    cJSON *poweroff = cJSON_GetObjectItem(root, "poweroff_min");
+    if (poweroff && cJSON_IsNumber(poweroff)) {
+        int v = (int)poweroff->valuedouble;
+        if (v >= 5 && v <= 180) gApp.poweroffMin = (uint16_t)v;
+    }
+
     cJSON_Delete(root);
-    ESP_LOGI(TAG, "Settings loaded: phone=%s", gApp.phoneNumber);
+    ESP_LOGI(TAG, "Settings loaded: phone=%s screen_off=%dm poweroff=%dm",
+             gApp.phoneNumber, gApp.screenOffMin, gApp.poweroffMin);
 }
 
 void saveSettings(void)
@@ -884,6 +912,8 @@ void saveSettings(void)
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "phone", gApp.phoneNumber);
+    cJSON_AddNumberToObject(root, "screen_off_min", gApp.screenOffMin);
+    cJSON_AddNumberToObject(root, "poweroff_min",   gApp.poweroffMin);
     char *json = cJSON_PrintUnformatted(root);
 
     FILE *f = fopen(SETTINGS_PATH, "w");

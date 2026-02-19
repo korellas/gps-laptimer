@@ -49,8 +49,13 @@ body{background:#1a1a2e;color:#e0e0e0;font-family:sans-serif;font-size:14px;padd
 h1{color:#e94560;font-size:20px;margin-bottom:16px}
 a{color:#53a8b6}
 .card{background:#16213e;border:1px solid #0f3460;border-radius:6px;padding:16px;margin-bottom:12px}
+h2{color:#53a8b6;font-size:14px;margin-bottom:12px}
 label{display:block;margin-bottom:4px;color:#aaa;font-size:12px}
-input[type=text]{width:100%%;background:#0f3460;color:#e0e0e0;border:1px solid #53a8b6;padding:8px;font-size:16px;border-radius:3px;margin-bottom:12px}
+input[type=text],input[type=number]{width:100%;background:#0f3460;color:#e0e0e0;border:1px solid #53a8b6;padding:8px;font-size:16px;border-radius:3px;margin-bottom:12px}
+input[type=number]{width:80px}
+.row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.row label{margin-bottom:0;flex:1}
+.unit{color:#666;font-size:12px}
 .btn{background:#e94560;color:white;border:none;padding:10px 24px;cursor:pointer;font-size:14px;border-radius:4px}
 .btn:hover{background:#c73852}
 #msg{color:#6bcb77;margin-top:8px;display:none}
@@ -59,20 +64,41 @@ input[type=text]{width:100%%;background:#0f3460;color:#e0e0e0;border:1px solid #
 </head><body>
 <a class="back" href="/">&larr; Home</a> &middot; <a class="back" href="/files">Files</a> &middot; <a class="back" href="/ota">Firmware Update</a>
 <h1>Settings</h1>
-<form id="form" class="card">
+<form id="form">
+<div class="card">
+  <h2>Display</h2>
   <label for="phone">Phone Number (displayed on screen)</label>
   <input type="text" id="phone" name="phone" placeholder="010-1234-5678" maxlength="31">
+</div>
+<div class="card">
+  <h2>Sleep / Power</h2>
+  <div class="row">
+    <label for="screen_off_min">Screen off after</label>
+    <input type="number" id="screen_off_min" name="screen_off_min" min="1" max="60" value="5">
+    <span class="unit">min</span>
+  </div>
+  <div class="row">
+    <label for="poweroff_min">Auto power-off after</label>
+    <input type="number" id="poweroff_min" name="poweroff_min" min="5" max="180" value="30">
+    <span class="unit">min</span>
+  </div>
+</div>
   <button type="submit" class="btn">Save</button>
   <div id="msg">Saved!</div>
 </form>
 <script>
-// 현재 설정 로드
 fetch('/api/settings').then(r=>r.json()).then(function(d){
   if(d.phone)document.getElementById('phone').value=d.phone;
+  if(d.screen_off_min)document.getElementById('screen_off_min').value=d.screen_off_min;
+  if(d.poweroff_min)document.getElementById('poweroff_min').value=d.poweroff_min;
 });
 document.getElementById('form').onsubmit=function(e){
   e.preventDefault();
-  var data=JSON.stringify({phone:document.getElementById('phone').value});
+  var data=JSON.stringify({
+    phone:document.getElementById('phone').value,
+    screen_off_min:parseInt(document.getElementById('screen_off_min').value,10),
+    poweroff_min:parseInt(document.getElementById('poweroff_min').value,10)
+  });
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:data})
   .then(function(r){
     if(r.ok){var m=document.getElementById('msg');m.style.display='block';setTimeout(function(){m.style.display='none'},2000)}

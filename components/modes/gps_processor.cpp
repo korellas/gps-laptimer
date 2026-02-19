@@ -19,6 +19,7 @@
 #include "../timing/sector_timing.h"
 #include "../geo/gps_filter.h"
 #include "../geo/dead_reckoning.h"
+#include "../geo/geo_utils.h"
 #include "../track/track_manager.h"
 #include "sd_logger.h"
 #include "sensor_fusion.h"
@@ -56,6 +57,16 @@ static int s_sectorBoundaryCount = 0;
 // Sensor fusion: 캘리브레이션 시도 타이머
 static unsigned long s_lastCalibAttemptMs = 0;
 static constexpr unsigned long CALIB_ATTEMPT_INTERVAL_MS = 10000;  // 10초
+
+// PRE_TRACK: 트랙별 이전 GPS 포인트 (피니시라인 교차 감지용)
+// setFinishLineFromDefinition()을 루프 내에서 호출하면 resetCrossingState()가 실행되어
+// hasPrevPoint가 초기화되므로, 교차 감지 성공 전까지는 전역 상태를 건드리지 않음.
+struct PreTrackPrev {
+    double prevLat;
+    double prevLng;
+    bool hasPrevPoint;
+};
+static PreTrackPrev s_preTrackPrev[BUILTIN_TRACK_COUNT];
 
 // ============================================================
 // HELPER: millis()
@@ -168,6 +179,7 @@ void initializeGPSMode() {
     // 세션 상태 초기화 (트랙 감지는 processRealGPS()의 PRE_TRACK 상태에서)
     s_sessionState = GPSSessionState::PRE_TRACK;
     s_sectorBoundaryCount = 0;
+    for (auto& p : s_preTrackPrev) p = {};
     resetTrackManager();
 
     // 섹터 타이밍 초기화
@@ -207,6 +219,7 @@ void resetRealGPS() {
 
     s_sessionState = GPSSessionState::PRE_TRACK;
     s_sectorBoundaryCount = 0;
+    for (auto& p : s_preTrackPrev) p = {};
 
     resetCrossingState();
     cancelRecording();
@@ -305,23 +318,48 @@ void processRealGPS() {
             switch (s_sessionState) {
 
             case GPSSessionState::PRE_TRACK: {
-                // 모든 트랙의 피니시라인을 체크하여 트랙 자동 식별 + 세션 시작
+                // 모든 트랙의 피니시라인을 체크하여 트랙 자동 식별 + 세션 시작.
+                //
+                // 핵심 제약: setFinishLineFromDefinition()은 내부에서 resetCrossingState()를
+                // 호출해 hasPrevPoint를 초기화하므로, 루프 내 반복 호출 시 교차 감지가
+                // 구조적으로 불가능함. 따라서:
+                //  1) 트랙별 이전 포인트를 s_preTrackPrev[]로 독립 관리
+                //  2) segmentsIntersect + 베어링 체크를 인라인으로 수행 (전역 상태 불변)
+                //  3) setFinishLineFromDefinition()은 교차 감지 성공 후 1회만 호출
+                //  4) prev 갱신은 체크 이후 (속도 조건 외부)에서 항상 수행 →
+                //     속도 임계값 재진입 시 직전 GPS 포인트가 항상 유효하게 유지됨
                 if (point.speedKmh >= SESSION_START_MIN_SPEED_KMH) {
                     for (int ti = 0; ti < BUILTIN_TRACK_COUNT; ti++) {
                         const TrackDefinition* track = BUILTIN_TRACKS[ti];
+                        PreTrackPrev& prev = s_preTrackPrev[ti];
+                        if (!prev.hasPrevPoint) continue;  // 첫 포인트: 하단에서 설정
+
                         for (int li = 0; li < track->layoutCount; li++) {
                             const TrackLayout* layout = track->getLayout(li);
                             if (!layout || !layout->finishLine.isConfigured()) continue;
+                            const FinishLineDefinition& fl = layout->finishLine;
 
-                            setFinishLineFromDefinition(layout->finishLine);
-                            if (checkFirstLineCrossing(point.lat, point.lng, point.headingDeg)) {
-                                // 트랙 식별 완료
+                            // 베어링 체크 (인라인 — 전역 crossing state 불변)
+                            uint16_t h = (uint16_t)(((int)point.headingDeg % 360 + 360) % 360);
+                            uint16_t bMin = (uint16_t)fl.validHeadingMin;
+                            uint16_t bMax = (uint16_t)fl.validHeadingMax;
+                            bool bearingOk = (bMin <= bMax) ? (h >= bMin && h <= bMax)
+                                                             : (h >= bMin || h <= bMax);
+                            if (!bearingOk) continue;
+
+                            // 이전→현재 경로가 피니시라인과 교차하는지 검사
+                            if (segmentsIntersect(prev.prevLat, prev.prevLng,
+                                                  point.lat, point.lng,
+                                                  fl.lat1, fl.lng1,
+                                                  fl.lat2, fl.lng2)) {
+                                // 트랙 식별 완료 — 이제 전역 finish line 1회 설정
                                 setActiveTrack(track, li);
+                                setFinishLineFromDefinition(fl);
                                 ESP_LOGI(TAG, "PRE_TRACK → SESSION_ACTIVE (%s / %s)",
                                          track->name, layout->name);
                                 sdLogEvent(now, "TRACK", track->name);
 
-                                // 트랙별 베스트 랩 로드 (세션 시작 전)
+                                // 트랙별 베스트 랩 로드
                                 if (loadReferenceLapFromStorage()) {
                                     gApp.hasValidReferenceLap = true;
                                     ESP_LOGI(TAG, "Best lap loaded for %s/%s",
@@ -342,6 +380,13 @@ void processRealGPS() {
                             }
                         }
                     }
+                }
+
+                // 이전 포인트 갱신 — 속도 조건 외부: 속도가 낮아졌다 다시 높아져도 직전 포인트 유효
+                for (int ti = 0; ti < BUILTIN_TRACK_COUNT; ti++) {
+                    s_preTrackPrev[ti].prevLat = point.lat;
+                    s_preTrackPrev[ti].prevLng = point.lng;
+                    s_preTrackPrev[ti].hasPrevPoint = true;
                 }
 
                 // Sensor fusion: 캘리브레이션 샘플 수집

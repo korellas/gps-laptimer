@@ -384,6 +384,8 @@ struct AppContext {
 
     // WiFi Portal settings (SPIFFS에 저장)
     char phoneNumber[32] = "";    // 전화번호 플레이트
+    uint16_t screenOffMin  = 5;   // 백라이트 OFF 유휴 시간 (분)
+    uint16_t poweroffMin   = 30;  // 자동 전원오프 유휴 시간 (분)
 
     // OTA 상태
     OTAState otaState = OTAState::IDLE;
