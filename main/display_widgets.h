@@ -10,10 +10,7 @@
 
 #include "lvgl.h"
 #include "page.h"
-
-// ── LVGL mutex helpers ──
-bool lvglLock(int timeoutMs);
-void lvglUnlock();
+#include "display_hal.h"   // lvglLock, lvglUnlock, LCD_H_RES, LCD_V_RES, readTouch
 
 // ── Gesture polling ──
 // Returns the current gesture (consumes the gesture event).

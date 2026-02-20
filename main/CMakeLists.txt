@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "display_hal.cpp"
         "waveshare_display.cpp"
         "display_config.cpp"
         "page_manager.cpp"

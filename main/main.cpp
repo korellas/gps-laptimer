@@ -28,6 +28,7 @@
 #include "config.h"
 #include "types.h"
 #include "waveshare_display.h"
+#include "display_hal.h"
 #include "geo_utils.h"
 #include "finish_line.h"
 #include "lap_storage.h"
@@ -731,6 +732,7 @@ static void app_init(void) {
     ota::confirmBoot();
 
     // 디스플레이 즉시 초기화 (깨진 화면 최소화)
+    tframe.hours = 0xFF;  // 시간 미설정 상태 (GPS 시간 수신 전까지 "--:--" 표시)
     initDisplay();
     setupUI();
     createStartupScreen();

@@ -25,6 +25,7 @@
 #include "config.h"
 #include "types.h"
 #include "waveshare_display.h"
+#include "display_hal.h"
 #include "finish_line.h"
 #include "lap_storage.h"
 #include "protocol.hpp"
