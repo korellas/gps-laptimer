@@ -245,6 +245,8 @@ void systemPowerOff(void);
    - "lvgl.h"
    ※ 제거: esp_lcd_*, driver/*, esp_io_expander_*, esp_heap_caps.h
    ※ 제거: ble_ota.h, wifi_portal.h, esp_wifi.h (미사용)
+   > ⚠️ **제거 전 검증**: `rg '(getBleOta|isBle|getWifi|wifi_ap|esp_wifi_|BLE_)' main/waveshare_display.cpp`
+   >   → 현재 grep 결과 0건 확인됨. 제거 안전. 단, 구현 시점에 재확인 권장.
 
 3. LV_FONT_DECLARE 4개:              share_tech_mono_24/32/56/72
 4. TAG 상수:                          static const char* TAG = "DISPLAY_UI";
@@ -364,6 +366,10 @@ void systemPowerOff(void);
 `display_widgets.h`를 include하는 모든 파일 (~14개: pages/*.cpp, page_manager.cpp 등)이
 `display_hal.h`의 선언을 자동으로 상속받으므로, 개별 파일에 display_hal.h를 추가할 필요 없다.
 
+> ⚠️ **시그니처 통일 필요**: 현재 `display_widgets.h`는 `void lvglUnlock()` (빈 괄호),
+> `display_hal.h`에서는 `void lvglUnlock(void)` 선언 예정. C++에서는 동일하지만
+> 삭제 시 `display_hal.h` 선언과 일치하는 `void` 스타일로 통일 권장.
+
 ### 4.6 `lvgl_mutex` 직접 접근 제거
 
 UI 코드에서 `lvgl_mutex`를 직접 사용하는 곳을 모두 `lvglLock()`/`lvglUnlock()`으로 교체:
@@ -371,18 +377,23 @@ UI 코드에서 `lvgl_mutex`를 직접 사용하는 곳을 모두 `lvglLock()`/`
 | 함수 | 현재 패턴 | 변경 후 |
 |------|-----------|---------|
 | `setupUI()` | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
-| `updateLapData()` | `lvgl_lock(50)` 내부 static 호출 | 이미 OK — `lvgl_lock` static이 HAL로 이동하므로 `lvglLock(50)` 공개 함수 사용 |
+| `updateLapData()` | `lvgl_lock(10)` / `lvgl_unlock()` × **5곳** (L1165,1182,1355,1379,1524) | `lvglLock(10)` / `lvglUnlock()` |
 | `updateGpsStatusPage()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50))` | `lvglLock(50)` |
 | `showNotification()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100))` | `lvglLock(100)` |
 | `updateNotification()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(30))` | `lvglLock(30)` |
-| `updateBatteryWarning()` | `lvgl_lock(50)` / `lvgl_unlock()` | `lvglLock(50)` / `lvglUnlock()` |
+| `updateBatteryWarning()` | `lvgl_lock(10)` / `lvgl_unlock()` × **2쌍** (L2075+2082, L2095+2097) | `lvglLock(10)` / `lvglUnlock()` |
 | `applyPageVisibilityForPage()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100))` | `lvglLock(100)` |
 | `updateLapSummaryDisplay()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50))` | `lvglLock(50)` |
-| `updateImuDisplay()` | `lvglLock(50)` / `lvglUnlock()` | 이미 OK |
+| `updateImuDisplay()` | `lvglLock(50)` / `lvglUnlock()` | 이미 OK (공개 API 사용 중) |
 | `createStartupScreen()` | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
 | `displayTest()` | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
 
-**요약**: 약 10곳에서 `xSemaphoreTake(lvgl_mutex, ...)` → `lvglLock(ms)`, `xSemaphoreGive(lvgl_mutex)` → `lvglUnlock()` 교체
+> ⚠️ **이전 버전 오류 수정**: `updateLapData()` 행이 "이미 OK"로 기술되어 있었으나 틀렸다.
+> `lvgl_lock()`은 `display_hal.cpp`로 이동 시 **static** 함수가 되므로 `waveshare_display.cpp`에서
+> 접근 불가. L1165/1182/1355/1379/1524 5곳 모두 `lvglLock()` / `lvglUnlock()` 교체 필수.
+> `updateBatteryWarning()`도 lock 쌍이 2개임을 확인 (L2075+2082, L2095+2097).
+
+**요약**: 총 ~18개 호출점. `lvgl_lock()` / `lvgl_unlock()` (static internal) 패턴 + `xSemaphoreTake(lvgl_mutex, ...)` 패턴 모두 `lvglLock()` / `lvglUnlock()` 공개 API로 교체.
 
 ### 4.7 `detectGesture()` 터치 접근 수정
 
@@ -439,12 +450,13 @@ static GestureResult detectGesture() {
 | `main/pages/wait_gps_page.cpp` | `readTouch()` | `#include "display_hal.h"` 추가 (또는 `waveshare_display.h` 경유) |
 | `main/serial_commands.cpp` | `systemPowerOff()` | `#include "display_hal.h"` 추가 (또는 `waveshare_display.h` 경유) |
 
-**핵심**: 기본 전략은 하위호환 유지다. `waveshare_display.h`가 `display_hal.h`를 include해서
-기존 include 체인을 깨지 않는다.
-HAL API만 쓰는 파일의 direct include 전환은 빌드 안정화 후 점진 정리(선택)로 진행한다.
+**핵심**: `waveshare_display.h`는 `display_hal.h`를 include할 수 없다 (섹션 4.4 참조).
+HAL API를 사용하는 `main/` 파일들은 `display_hal.h`를 직접 include해야 한다.
+섹션 7 Step 7에 파일별 변경 목록이 열거되어 있다.
 
-**추천**: 일괄 교체 대신, `waveshare_display.h`의 `display_hal.h` 재노출을 유지하고
-외부 파일 include 정리는 선택적으로 단계 진행
+> ⚠️ **주의**: 이전 버전에 "waveshare_display.h의 display_hal.h 재노출" 전략이 언급되어 있었으나
+> **섹션 4.4와 모순**된다 — components/common/include/의 헤더가 main/ 헤더를 include하는 것은
+> 컴포넌트 빌드 시 include 경로 미지정으로 컴파일 실패. 해당 전략은 채택 불가, 삭제됨.
 
 ---
 
