@@ -452,7 +452,7 @@ static GestureResult detectGesture() {
 | 파일 | 사용하는 HAL API | 변경 (현재 코드 snapshot 기준) |
 |------|-----------------|------|
 | `main/main.cpp` | `initPowerLatch()`, `initDisplay()`, `getSensorI2CBus()`, `systemPowerOff()` | `#include "display_hal.h"` 추가 |
-| `main/page_manager.cpp` | `readTouch()`, `setBacklight()`, `systemPowerOff()` | `#include "display_hal.h"` 추가 |
+| `main/page_manager.cpp` | `readTouch()`, `setBacklight()`, `systemPowerOff()` | **변경 불필요** — `display_widgets.h` 이미 include 중 (L8), transitive 노출 |
 | `components/modes/gps_processor.cpp` | `setGpsSignalLost()` → 이건 UI이므로 waveshare_display.h에 유지 | 변경 없음 |
 | `main/pages/wait_gps_page.cpp` | `readTouch()` | **변경 불필요** — `display_widgets.h` 이미 include 중이며, 4.5에서 display_hal.h 추가 후 readTouch() 자동 노출 |
 | `main/serial_commands.cpp` | `systemPowerOff()` | `#include "display_hal.h"` 직접 추가 필요 — waveshare_display.h가 systemPowerOff 더 이상 미노출 |
@@ -460,8 +460,8 @@ static GestureResult detectGesture() {
 **include 정책 (섹션 4.5와 통일)**:
 - `waveshare_display.h`는 `display_hal.h`를 include 불가 (섹션 4.4: 컴포넌트 경로 제약)
 - `display_widgets.h` 경유 transitive 노출 = 기본 정책 (섹션 4.5)
-- `display_hal.h` 직접 include가 필요한 대상: `display_widgets.h`를 include하지 않는 파일만
-  (main.cpp, serial_commands.cpp)
+- `display_hal.h` 직접 include 필요 대상: `display_widgets.h`를 include하지 않는 파일만
+  (main.cpp, serial_commands.cpp — 총 2개)
 
 ---
 
@@ -483,11 +483,10 @@ Step 5: display_widgets.h 수정
         - lvglLock/lvglUnlock 중복 선언 제거
         - #include "display_hal.h" 추가
 Step 6: main/CMakeLists.txt에 display_hal.cpp 추가
-Step 7: 외부 파일 #include 업데이트
+Step 7: 외부 파일 #include 업데이트 (display_widgets.h 미포함 파일만)
         - main/main.cpp: display_hal.h 추가 (initPowerLatch, initDisplay, getSensorI2CBus, systemPowerOff)
-        - main/page_manager.cpp: display_hal.h 추가 (readTouch, setBacklight, systemPowerOff)
         - main/serial_commands.cpp: display_hal.h 추가 (systemPowerOff)
-        ※ main/pages/wait_gps_page.cpp: 변경 불필요 — display_widgets.h 경유 자동 노출
+        ※ page_manager.cpp, pages/*.cpp: display_widgets.h 경유 자동 노출 → 변경 불필요
 Step 8: 빌드 검증 (idf.py build)
 Step 9: 커밋
 ```
