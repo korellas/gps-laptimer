@@ -2,7 +2,7 @@
  * @file wifi_portal.h
  * @brief WiFi Captive Portal with WebSocket log viewer and settings
  *
- * SoftAP "LAPTIMER" (open) + DNS redirect + HTTP server + WebSocket log streaming
+ * SoftAP "LAPTIMER" (WPA2) + DNS redirect + HTTP server + WebSocket log streaming
  * WiFi는 기본 OFF — 시리얼 'w' 또는 API로 켜고, 5분 무접속 시 자동 OFF
  */
 
@@ -10,8 +10,9 @@
 #define WIFI_PORTAL_H
 
 // SoftAP identity — used by both wifi_portal.cpp and the display layer
-#define WIFI_AP_SSID    "LAPTIMER"
-#define WIFI_AP_IP_STR  "192.168.4.1"
+#define WIFI_AP_SSID     "LAPTIMER"
+#define WIFI_AP_PASSWORD "laptimer"
+#define WIFI_AP_IP_STR   "192.168.4.1"
 
 #ifdef __cplusplus
 extern "C" {

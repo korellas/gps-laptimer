@@ -92,7 +92,6 @@ void processRealGPS();
 void resetRealGPS();
 
 // Note: isGPSSignalLost() is defined in geo/gps_filter.h
-// Note: isLapInProgress() is defined in timing/lap_manager.h
 
 /**
  * @brief Get last valid GPS timestamp

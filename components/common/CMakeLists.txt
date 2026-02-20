@@ -3,4 +3,5 @@ idf_component_register(
         "app_context.cpp"
     INCLUDE_DIRS
         "."
+        "include"
 )

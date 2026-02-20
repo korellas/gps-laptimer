@@ -1163,8 +1163,18 @@ void updateLapData(void)
         }
 
         if (lvgl_lock(10)) {
-            if (lbl_delta)       lv_label_set_text(lbl_delta, speedBuf);
-            if (lbl_center_unit) lv_obj_clear_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
+            if (lbl_delta) {
+                // Right-align speed so digit count changes don't shift position
+                lv_obj_set_width(lbl_delta, 180);
+                lv_obj_set_style_text_align(lbl_delta, LV_TEXT_ALIGN_RIGHT, 0);
+                lv_obj_align(lbl_delta, LV_ALIGN_CENTER, -60, 0);
+                lv_label_set_text(lbl_delta, speedBuf);
+            }
+            if (lbl_center_unit) {
+                lv_obj_set_style_text_font(lbl_center_unit, &share_tech_mono_32, 0);
+                lv_obj_align(lbl_center_unit, LV_ALIGN_CENTER, 91, 12);
+                lv_obj_clear_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
+            }
             if (lbl_datetime) {
                 lv_label_set_text(lbl_datetime, bottomBuf);
                 lv_obj_clear_flag(lbl_datetime, LV_OBJ_FLAG_HIDDEN);
@@ -1343,6 +1353,17 @@ void updateLapData(void)
 
     // ═══ Phase 2: LVGL Widget Updates (mutex 필요) ═══
     if (!lvgl_lock(10)) return;
+
+    // Restore pretrack overrides (right-aligned speed, smaller km/h font)
+    if (lbl_delta) {
+        lv_obj_set_width(lbl_delta, 420);
+        lv_obj_set_style_text_align(lbl_delta, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(lbl_delta, LV_ALIGN_CENTER, 0, 0);
+    }
+    if (lbl_center_unit) {
+        lv_obj_set_style_text_font(lbl_center_unit, &share_tech_mono_56, 0);
+        lv_obj_align(lbl_center_unit, LV_ALIGN_CENTER, 120, 8);
+    }
 
     // Defensive: ensure GPS status labels hidden while on main page
     for (int i = 0; i < GPS_STATUS_LINE_COUNT; i++) {

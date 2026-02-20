@@ -32,7 +32,7 @@ struct SettingsPage : Page {
     void onUpdate() override {
         if (!infoShown) {
             char infoBuf[96];
-            snprintf(infoBuf, sizeof(infoBuf), "WiFi: " WIFI_AP_SSID "  /  " WIFI_AP_IP_STR);
+            snprintf(infoBuf, sizeof(infoBuf), "WiFi: " WIFI_AP_SSID " / PW: " WIFI_AP_PASSWORD " / " WIFI_AP_IP_STR);
             if (lvglLock(10)) {
                 lv_obj_set_style_text_color(getStartupStatusLabel(),
                     lv_color_make(0xFF, 0x88, 0x00), 0);

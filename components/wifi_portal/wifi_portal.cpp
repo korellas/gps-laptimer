@@ -195,6 +195,11 @@ static esp_err_t handleGetSettings(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "screen_off_min", gApp.screenOffMin);
     cJSON_AddNumberToObject(root, "poweroff_min",   gApp.poweroffMin);
     char *json = cJSON_PrintUnformatted(root);
+    if (!json) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON format error");
+        return ESP_FAIL;
+    }
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -320,12 +325,19 @@ static esp_err_t handleOtaUpload(httpd_req_t *req)
         return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     }
 
-    // 4KB 수신 버퍼 (static: 스택 사용 최소화)
-    static uint8_t otaBuf[4096];
+    // 4KB 수신 버퍼 (동적 할당: WiFi 비활성 시 RAM 반환)
+    uint8_t* otaBuf = (uint8_t*)malloc(4096);
+    if (!otaBuf) {
+        ota::abort();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
     size_t remaining = contentLen;
+    esp_err_t result = ESP_OK;
 
     while (remaining > 0) {
-        size_t toRead = (remaining < sizeof(otaBuf)) ? remaining : sizeof(otaBuf);
+        size_t toRead = (remaining < 4096) ? remaining : 4096;
         int received = httpd_req_recv(req, (char *)otaBuf, toRead);
         if (received <= 0) {
             if (received == HTTPD_SOCK_ERR_TIMEOUT) {
@@ -334,6 +346,7 @@ static esp_err_t handleOtaUpload(httpd_req_t *req)
             ESP_LOGE(TAG, "OTA recv error: %d", received);
             ota::abort();
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+            free(otaBuf);
             return ESP_FAIL;
         }
 
@@ -341,11 +354,15 @@ static esp_err_t handleOtaUpload(httpd_req_t *req)
             char resp[128];
             snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}", gApp.otaErrorMsg);
             httpd_resp_set_type(req, "application/json");
-            return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+            result = httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+            free(otaBuf);
+            return result;
         }
 
         remaining -= received;
     }
+
+    free(otaBuf);
 
     if (!ota::end()) {
         char resp[128];
@@ -686,12 +703,19 @@ static esp_err_t handleFileDownload(httpd_req_t *req)
     snprintf(cdHeader, sizeof(cdHeader), "attachment; filename=\"%s\"", fname);
     httpd_resp_set_hdr(req, "Content-Disposition", cdHeader);
 
-    static char fileBuf[512];  // 내부 RAM 절약 (SD DMA와 경합 방지)
+    char* fileBuf = (char*)malloc(512);
+    if (!fileBuf) {
+        fclose(f);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
     size_t n;
-    while ((n = fread(fileBuf, 1, sizeof(fileBuf), f)) > 0) {
+    while ((n = fread(fileBuf, 1, 512, f)) > 0) {
         if (httpd_resp_send_chunk(req, fileBuf, (ssize_t)n) != ESP_OK) break;
     }
     fclose(f);
+    free(fileBuf);
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
@@ -937,10 +961,11 @@ static void startSoftAP(void)
     wifi_config_t wifi_config = {};
     strcpy((char *)wifi_config.ap.ssid, WIFI_AP_SSID);
     wifi_config.ap.ssid_len = strlen(WIFI_AP_SSID);
+    strcpy((char *)wifi_config.ap.password, WIFI_AP_PASSWORD);
     wifi_config.ap.channel = 1;
     // Single-user OTA portal: allow only one station to minimize AP footprint.
     wifi_config.ap.max_connection = 1;
-    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+    wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
@@ -964,7 +989,7 @@ static void startSoftAP(void)
     // WiFi 전력절약 끄기 (DHCP 패킷 드롭 방지)
     esp_wifi_set_ps(WIFI_PS_NONE);
 
-    ESP_LOGI(TAG, "SoftAP started: SSID=" WIFI_AP_SSID " (open), int_free=%lu, int_largest=%lu",
+    ESP_LOGI(TAG, "SoftAP started: SSID=" WIFI_AP_SSID " (WPA2), int_free=%lu, int_largest=%lu",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
@@ -1025,6 +1050,11 @@ void saveSettings(void)
     cJSON_AddNumberToObject(root, "screen_off_min", gApp.screenOffMin);
     cJSON_AddNumberToObject(root, "poweroff_min",   gApp.poweroffMin);
     char *json = cJSON_PrintUnformatted(root);
+    if (!json) {
+        cJSON_Delete(root);
+        ESP_LOGE(TAG, "Failed to format settings JSON");
+        return;
+    }
 
     FILE *f = fopen(SETTINGS_PATH, "w");
     if (f) {

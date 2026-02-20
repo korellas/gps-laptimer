@@ -173,7 +173,8 @@ GPSPoint smoothPoint(const GPSPoint& point) {
     smoothed.lapTimeMs = point.lapTimeMs;
     
     s_state.smoothedCount++;
-    
+    smoothed.initialized = true;
+
     return smoothed;
 }
 

@@ -305,8 +305,13 @@ static bool loadFromFile(void)
     char* buf = (char*)malloc(size + 1);
     if (!buf) { fclose(f); return false; }
 
-    fread(buf, 1, size, f);
+    size_t readBytes = fread(buf, 1, size, f);
     fclose(f);
+    if ((long)readBytes != size) {
+        ESP_LOGW(TAG, "Calibration file read incomplete: %d/%ld", (int)readBytes, size);
+        free(buf);
+        return false;
+    }
     buf[size] = '\0';
 
     cJSON* root = cJSON_Parse(buf);

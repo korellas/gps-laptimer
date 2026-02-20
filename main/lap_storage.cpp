@@ -31,9 +31,20 @@ constexpr char LEGACY_LAPS_DIR[] = "/laps";
 constexpr char LEGACY_BEST_LAP_FILE[] = "/laps/best.bin";
 constexpr int FILENAME_BUF_SIZE = 300;
 
-// SD 마운트 여부에 따라 경로 동적 결정
+// 부트 시 1회 결정, 세션 중 변경 불가 (SD fallback 금지 정책)
+static const char* s_cachedLapsDir = nullptr;
+
 static const char* getLapsDir() {
-    return sdcardIsMounted() ? SD_LAPS_DIR : SPIFFS_LAPS_DIR;
+    if (!s_cachedLapsDir) {
+        s_cachedLapsDir = sdcardIsMounted() ? SD_LAPS_DIR : SPIFFS_LAPS_DIR;
+    }
+
+    // 세션 중 SD 탈락 감지 (fallback 하지 않음)
+    if (s_cachedLapsDir == SD_LAPS_DIR && !sdcardIsMounted()) {
+        ESP_LOGE(TAG, "SD card removed during session! Storage writes will fail.");
+    }
+
+    return s_cachedLapsDir;
 }
 
 static const char* getLegacyBestLapPath() {
@@ -134,7 +145,24 @@ static void migrateLegacyLaps() {
         char newPath[FILENAME_BUF_SIZE];
         snprintf(oldPath, sizeof(oldPath), "%s/%s", LEGACY_LAPS_DIR, name);
         snprintf(newPath, sizeof(newPath), "%s/%s", getLapsDir(), name);
-        rename(oldPath, newPath);
+        if (rename(oldPath, newPath) != 0) {
+            // 크로스 파일시스템 rename 실패 시 복사 후 삭제
+            FILE* src = fopen(oldPath, "rb");
+            FILE* dst = fopen(newPath, "wb");
+            if (src && dst) {
+                char cpBuf[256];
+                size_t n;
+                while ((n = fread(cpBuf, 1, sizeof(cpBuf), src)) > 0) {
+                    fwrite(cpBuf, 1, n, dst);
+                }
+                fclose(src); fclose(dst);
+                remove(oldPath);
+            } else {
+                if (src) fclose(src);
+                if (dst) fclose(dst);
+                ESP_LOGW(TAG, "Migration failed: %s", oldPath);
+            }
+        }
     }
 
     closedir(dir);
@@ -227,84 +255,22 @@ bool saveLap(const StorableLap& lap) {
     return true;
 }
 
-bool loadLap(StorableLap& lap, uint16_t sessionId, uint16_t lapId) {
-    char filename[FILENAME_BUF_SIZE];
-    getLapFilename(filename, sessionId, lapId);
-
-    if (!fileExists(filename)) {
-        return false;
-    }
-
-    FILE* f = fopen(filename, "rb");
-    if (!f) {
-        return false;
-    }
-
-    LapHeader header;
-    size_t read = fread(&header, 1, sizeof(LapHeader), f);
-    if (read != sizeof(LapHeader) || header.magic != LAP_FILE_MAGIC) {
-        fclose(f);
-        return false;
-    }
-
-    lap.points.resize(header.pointCount);
-    read = fread(lap.points.data(), 1, header.pointCount * sizeof(StoredPoint), f);
-    fclose(f);
-
-    if (read != header.pointCount * sizeof(StoredPoint)) {
-        lap.points.clear();
-        return false;
-    }
-
-    lap.totalTimeMs = header.totalTimeMs;
-    lap.startTimestamp = header.startTimestamp;
-    lap.maxSpeedKmh = header.maxSpeedX10 / 10.0f;
-    lap.avgSpeedKmh = header.avgSpeedX10 / 10.0f;
-    lap.sessionId = header.sessionId;
-    lap.lapId = header.lapId;
-    if (header.version >= 2) {
-        lap.trackIndex = header.trackIndex;
-        lap.layoutIndex = header.layoutIndex;
-    } else {
-        lap.trackIndex = 0xFF;
-        lap.layoutIndex = 0xFF;
-    }
-
-    return true;
-}
-
-bool deleteLap(uint16_t sessionId, uint16_t lapId) {
-    char filename[FILENAME_BUF_SIZE];
-    getLapFilename(filename, sessionId, lapId);
-    return remove(filename) == 0;
-}
-
-// ============================================================
-// Best Lap Operations
-// ============================================================
-
-// Helper: load a best lap from a specific file path
-static bool loadBestLapFromFile(StorableLap& lap, const char* path) {
-    if (!fileExists(path)) {
-        return false;
-    }
-
-    FILE* f = fopen(path, "rb");
-    if (!f) {
-        return false;
-    }
-
+// Common helper: read a StorableLap from an already-opened file
+// Validates header magic and pointCount upper bound (MAX_POINTS_PER_LAP)
+static bool readLapFromFile(FILE* f, StorableLap& lap) {
     LapHeader header;
     size_t rd = fread(&header, 1, sizeof(LapHeader), f);
     if (rd != sizeof(LapHeader) || header.magic != LAP_FILE_MAGIC) {
-        fclose(f);
+        return false;
+    }
+
+    if (header.pointCount == 0 || header.pointCount > MAX_POINTS_PER_LAP) {
+        ESP_LOGW(TAG, "Invalid pointCount: %u (max=%d)", header.pointCount, MAX_POINTS_PER_LAP);
         return false;
     }
 
     lap.points.resize(header.pointCount);
     rd = fread(lap.points.data(), 1, header.pointCount * sizeof(StoredPoint), f);
-    fclose(f);
-
     if (rd != header.pointCount * sizeof(StoredPoint)) {
         lap.points.clear();
         return false;
@@ -325,6 +291,49 @@ static bool loadBestLapFromFile(StorableLap& lap, const char* path) {
     }
 
     return true;
+}
+
+bool loadLap(StorableLap& lap, uint16_t sessionId, uint16_t lapId) {
+    char filename[FILENAME_BUF_SIZE];
+    getLapFilename(filename, sessionId, lapId);
+
+    if (!fileExists(filename)) {
+        return false;
+    }
+
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        return false;
+    }
+
+    bool ok = readLapFromFile(f, lap);
+    fclose(f);
+    return ok;
+}
+
+bool deleteLap(uint16_t sessionId, uint16_t lapId) {
+    char filename[FILENAME_BUF_SIZE];
+    getLapFilename(filename, sessionId, lapId);
+    return remove(filename) == 0;
+}
+
+// ============================================================
+// Best Lap Operations
+// ============================================================
+
+static bool loadBestLapFromFile(StorableLap& lap, const char* path) {
+    if (!fileExists(path)) {
+        return false;
+    }
+
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+
+    bool ok = readLapFromFile(f, lap);
+    fclose(f);
+    return ok;
 }
 
 bool saveBestLap(const StorableLap& lap, const char* trackId, const char* layoutId) {
@@ -567,13 +576,17 @@ uint16_t getNextSessionId() {
         const char* name = ent->d_name;
         if (name[0] == 's') {
             int sid = atoi(name + 1);
-            if (sid > maxSession) {
-                maxSession = sid;
+            if (sid > 0 && sid <= 65534 && (uint16_t)sid > maxSession) {
+                maxSession = (uint16_t)sid;
             }
         }
     }
 
     closedir(dir);
+    if (maxSession >= 65534) {
+        ESP_LOGW(TAG, "Session ID at limit (65534)");
+        return 65534;
+    }
     return maxSession + 1;
 }
 

@@ -135,6 +135,7 @@ bool imuInit(i2c_master_bus_handle_t bus)
 
     if (whoami != QMI8658C_WHO_AM_I_VAL) {
         ESP_LOGE(TAG, "WHO_AM_I mismatch: 0x%02X (expected 0x%02X)", whoami, QMI8658C_WHO_AM_I_VAL);
+        i2c_master_bus_rm_device(s_imu_dev);
         s_imu_dev = nullptr;
         return false;
     }

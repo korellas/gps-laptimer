@@ -11,9 +11,11 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
-#include <cstdio>
 
+#include "esp_log.h"
 #include "esp_timer.h"
+
+static const char* TAG = "delta";
 
 // cos(lat) 사전계산 캐시 (트랙 위도 기준, 세그먼트 검색에 재사용)
 static float s_cosLat = 0.0f;
@@ -35,7 +37,7 @@ void initDeltaCalculator(const DeltaConfig& config) {
     resetDeltaCalculator();
     s_initialized = true;
     
-    printf("[DeltaCalc] Initialized\n");
+    ESP_LOGI(TAG, "Initialized");
 }
 
 void resetDeltaCalculator() {
@@ -49,7 +51,7 @@ void resetDeltaCalculator() {
 
 bool setReferenceLap(const LapData& lap) {
     if (lap.points.empty()) {
-        printf("[DeltaCalc] Cannot set empty reference lap\n");
+        ESP_LOGW(TAG, "Cannot set empty reference lap");
         return false;
     }
 
@@ -63,10 +65,10 @@ bool setReferenceLap(const LapData& lap) {
     gApp.hasValidReferenceLap = true;
     gApp.lastValidSegmentIndex = -1;
 
-    printf("[DeltaCalc] Reference set: %d pts, %.2fs, %.1fm\n",
-           (int)gApp.referenceLap.points.size(),
-           gApp.referenceLap.totalTimeMs / 1000.0f,
-           gApp.referenceLap.totalTrackDistance);
+    ESP_LOGI(TAG, "Reference set: %d pts, %.2fs, %.1fm",
+             (int)gApp.referenceLap.points.size(),
+             gApp.referenceLap.totalTimeMs / 1000.0f,
+             gApp.referenceLap.totalTrackDistance);
 
     return true;
 }
@@ -84,7 +86,7 @@ void clearReferenceLap() {
     gApp.hasValidReferenceLap = false;
     gApp.lastValidSegmentIndex = -1;
 
-    printf("[DeltaCalc] Reference cleared\n");
+    ESP_LOGI(TAG, "Reference cleared");
 }
 
 unsigned long getReferenceLapTimeMs() {
@@ -120,8 +122,8 @@ void calculateCumulativeDistances(LapData& lap) {
     
     lap.totalTrackDistance = cumDist;
     
-    printf("[DeltaCalc] Track distance: %.1fm (%d pts)\n",
-           cumDist, lap.points.size());
+    ESP_LOGI(TAG, "Track distance: %.1fm (%d pts)",
+             cumDist, (int)lap.points.size());
 }
 
 // ============================================================
@@ -244,8 +246,8 @@ DeltaResult calculateDelta(const GPSPoint& current, const LapData& reference,
         static unsigned long s_lastFailLog = 0;
         unsigned long nowMs = (unsigned long)(esp_timer_get_time() / 1000ULL);
         if (nowMs - s_lastFailLog >= 1000) {
-            printf("[DeltaCalc] PROJ FAIL: dist=%.1fm seg=%d searchRange=[%d,%d]\n",
-                   minDistanceM, bestSegmentStart, searchStart, searchEnd);
+            ESP_LOGW(TAG, "PROJ FAIL: dist=%.1fm seg=%d searchRange=[%d,%d]",
+                     minDistanceM, bestSegmentStart, searchStart, searchEnd);
             s_lastFailLog = nowMs;
         }
         return result;

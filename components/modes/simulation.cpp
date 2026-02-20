@@ -14,17 +14,19 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "Simulation";
 #include "config.h"
 #include "types.h"
 #include "../geo/geo_utils.h"
-#include "../waveshare_display.h"
-#include "../finish_line.h"
-#include "../protocol.hpp"
+#include "waveshare_display.h"
+#include "finish_line.h"
+#include "protocol.hpp"
 #include "../timing/delta_calculator.h"
-#include "../timing/lap_manager.h"
 #include "../timing/sector_timing.h"
+#include "../track/builtin_tracks.h"
 #include "../track/track_manager.h"
 #include "../../examples/everland_track_data.h"
 #include "../../examples/everland_reference_5283.h"
@@ -88,6 +90,116 @@ static bool checkSimFinishLineCrossing(double p1Lat, double p1Lng, double p2Lat,
         FINISH_LINE_A_LAT, FINISH_LINE_A_LNG,
         FINISH_LINE_B_LAT, FINISH_LINE_B_LNG
     );
+}
+
+// ============================================================
+// REFERENCE LAP LOADING (이전 lap_manager에서 이전)
+// ============================================================
+
+static bool loadRefLapFromTrackData(int lapIdx) {
+    const LapBoundary* boundaries = getEverlandLapBoundaries();
+    const TrackPoint* points = getEverlandTrackPoints();
+    int lapCount = getEverlandLapCount();
+
+    if (lapIdx < 0 || lapIdx >= lapCount) {
+        ESP_LOGW(TAG, "Invalid lap index: %d", lapIdx);
+        return false;
+    }
+
+    const LapBoundary& bounds = boundaries[lapIdx];
+
+    LapData lap;
+    lap.points.reserve(bounds.endIndex - bounds.startIndex + 1);
+
+    float maxSpeed = 0.0f;
+    float totalSpeed = 0.0f;
+
+    for (int i = bounds.startIndex; i <= bounds.endIndex; i++) {
+        const TrackPoint& tp = points[i];
+
+        GPSPoint point;
+        point.lat = tp.lat / 1e7;
+        point.lng = tp.lon / 1e7;
+        point.lapTimeMs = tp.timeMs;
+        point.speedKmh = tp.speedX10 / 10.0f;
+        point.headingDeg = 0.0f;
+        point.gpsTimeMs = tp.timeMs;
+
+        lap.points.push_back(point);
+
+        totalSpeed += point.speedKmh;
+        if (point.speedKmh > maxSpeed) {
+            maxSpeed = point.speedKmh;
+        }
+
+        if (i % 100 == 0) {
+            taskYIELD();
+        }
+    }
+
+    if (lap.points.empty()) return false;
+
+    lap.startTimeMs = 0;
+    lap.totalTimeMs = bounds.lapTimeMs;
+    lap.maxSpeedKmh = maxSpeed;
+    lap.avgSpeedKmh = totalSpeed / lap.points.size();
+
+    if (!setReferenceLap(lap)) return false;
+
+    gApp.bestLapTimeMs = bounds.lapTimeMs;
+    gApp.hasValidReferenceLap = true;
+
+    ESP_LOGI(TAG, "Loaded track data lap %d: %d pts, %.2fs",
+             lapIdx, (int)lap.points.size(), lap.totalTimeMs / 1000.0f);
+    return true;
+}
+
+static bool loadReferenceLapFromPriorSession() {
+    const auto* refPoints = getEverlandReferencePoints();
+    int refCount = getEverlandReferencePointCount();
+
+    if (refPoints == nullptr || refCount <= 0) return false;
+
+    LapData lap;
+    lap.points.reserve(refCount);
+
+    float maxSpeed = 0.0f;
+    float totalSpeed = 0.0f;
+
+    for (int i = 0; i < refCount; i++) {
+        const auto& tp = refPoints[i];
+
+        GPSPoint point;
+        point.lat = tp.lat / 1e7;
+        point.lng = tp.lon / 1e7;
+        point.lapTimeMs = tp.timeMs;
+        point.speedKmh = tp.speedX10 / 10.0f;
+        point.headingDeg = 0.0f;
+        point.gpsTimeMs = tp.timeMs;
+
+        lap.points.push_back(point);
+
+        totalSpeed += point.speedKmh;
+        if (point.speedKmh > maxSpeed) {
+            maxSpeed = point.speedKmh;
+        }
+    }
+
+    if (lap.points.empty()) return false;
+
+    lap.startTimeMs = 0;
+    lap.totalTimeMs = lap.points.back().lapTimeMs;
+    lap.maxSpeedKmh = maxSpeed;
+    lap.avgSpeedKmh = totalSpeed / lap.points.size();
+
+    if (!setReferenceLap(lap)) return false;
+
+    gApp.bestLapTimeMs = lap.totalTimeMs;
+    gApp.hasValidReferenceLap = true;
+
+    ESP_LOGI(TAG, "Loaded prior session reference: %d pts, %.2fs",
+             (int)lap.points.size(), lap.totalTimeMs / 1000.0f);
+    return true;
 }
 
 // ============================================================

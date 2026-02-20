@@ -42,7 +42,6 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
-#include "rom/ets_sys.h"  // ets_delay_us()
 #include "wifi_portal.h"
 #include "esp_pm.h"
 #include "esp_wifi.h"
@@ -112,22 +111,55 @@ static const TzRegion s_tzTable[] = {
 
 static bool s_tzDetected = false;
 
-static void applyTimezoneFromPosition(float lat, float lon) {
-    for (const auto& r : s_tzTable) {
-        if (lat >= r.latMin && lat <= r.latMax && lon >= r.lonMin && lon <= r.lonMax) {
-            setenv("TZ", r.posixTz, 1);
-            tzset();
-            ESP_LOGI(TAG, "Timezone: %s (lat=%.2f lon=%.2f)", r.posixTz, (double)lat, (double)lon);
-            return;
-        }
+static constexpr const char* TZ_SAVE_PATH = "/spiffs/config/tz.txt";
+
+static void saveTzToSpiffs(const char* posixTz) {
+    FILE* f = fopen(TZ_SAVE_PATH, "w");
+    if (f) {
+        fputs(posixTz, f);
+        fclose(f);
+        ESP_LOGI(TAG, "Timezone saved: %s", posixTz);
     }
-    // 테이블 미매칭 시 경도 기반 근사 (DST 미적용)
-    int off = (int)roundf(lon / 15.0f);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "UTC%+d", -off);
+}
+
+// 부팅 시 이전 타임존 복원 (SPIFFS 마운트 후 호출)
+static bool loadTzFromSpiffs() {
+    FILE* f = fopen(TZ_SAVE_PATH, "r");
+    if (!f) return false;
+    char buf[48] = {};
+    if (fgets(buf, sizeof(buf), f)) {
+        char* nl = strchr(buf, '\n');
+        if (nl) *nl = '\0';
+    }
+    fclose(f);
+    if (buf[0] == '\0') return false;
     setenv("TZ", buf, 1);
     tzset();
-    ESP_LOGW(TAG, "Timezone fallback: %s (lat=%.2f lon=%.2f)", buf, (double)lat, (double)lon);
+    ESP_LOGI(TAG, "Timezone restored from SPIFFS: %s", buf);
+    return true;
+}
+
+static void applyTimezoneFromPosition(float lat, float lon) {
+    const char* tzStr = nullptr;
+    char fallbackBuf[16];
+
+    for (const auto& r : s_tzTable) {
+        if (lat >= r.latMin && lat <= r.latMax && lon >= r.lonMin && lon <= r.lonMax) {
+            tzStr = r.posixTz;
+            ESP_LOGI(TAG, "Timezone: %s (lat=%.2f lon=%.2f)", tzStr, (double)lat, (double)lon);
+            break;
+        }
+    }
+    if (!tzStr) {
+        int off = (int)roundf(lon / 15.0f);
+        snprintf(fallbackBuf, sizeof(fallbackBuf), "UTC%+d", -off);
+        tzStr = fallbackBuf;
+        ESP_LOGW(TAG, "Timezone fallback: %s (lat=%.2f lon=%.2f)", tzStr, (double)lat, (double)lon);
+    }
+
+    setenv("TZ", tzStr, 1);
+    tzset();
+    saveTzToSpiffs(tzStr);
 }
 
 static bool isSystemClockValidUtc(time_t nowUtc) {
@@ -147,25 +179,25 @@ static constexpr float BATTERY_SHUTDOWN_VOLTAGE = 3.5f;
 static constexpr int BATTERY_SHUTDOWN_COUNT = 3;
 static int s_lowVoltageCount = 0;
 
-// 전압(V) → SoC% 변환 (G6EJD 4차 다항식 기반)
-// Source: G6EJD polynomial for LiPo discharge curve
+// 전압(V) → SoC% 변환 (G6EJD 4차 다항식 기반, 3.50~4.15V 범위)
+// Source: G6EJD polynomial for LiPo discharge curve (rescaled)
 static float voltageToPercent(float voltage)
 {
     // Clamp at voltage limits
-    if (voltage >= 4.2f) return 100.0f;
-    if (voltage <= 3.524f) return 0.0f;
+    if (voltage >= 4.15f) return 100.0f;
+    if (voltage <= 3.5f) return 0.0f;
 
-    // 4th-order polynomial: percentage = 2808.3808*v⁴ - 43560.9157*v³ + 252848.5888*v² - 650767.4615*v + 626532.5703
+    // 4th-order polynomial: percentage = 3285.4083*v⁴ - 50465.9034*v³ + 290122.4621*v² - 739652.5089*v + 705492.4290
     float v = voltage;
     float v2 = v * v;
     float v3 = v2 * v;
     float v4 = v3 * v;
 
-    float percentage = 2808.3808f * v4
-                     - 43560.9157f * v3
-                     + 252848.5888f * v2
-                     - 650767.4615f * v
-                     + 626532.5703f;
+    float percentage = 3285.4083f * v4
+                     - 50465.9034f * v3
+                     + 290122.4621f * v2
+                     - 739652.5089f * v
+                     + 705492.4290f;
 
     // Clamp result to valid range
     if (percentage < 0.0f) percentage = 0.0f;
@@ -221,7 +253,7 @@ static void readBattery(void)
             allRaw[readCount++] = raw;
         }
         if (i < ADC_TOTAL_READS - 1) {
-            ets_delay_us(200);
+            vTaskDelay(1);  // ADC settling (최소 1ms, 원래 200us)
         }
     }
 
@@ -294,6 +326,9 @@ static void readBattery(void)
 // IMU TASK (100Hz)
 // ============================================================
 
+static portMUX_TYPE s_imuMux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t s_imuTaskHandle = nullptr;
+
 static void imuTask(void *arg)
 {
     // IMU 초기화 대기
@@ -312,8 +347,10 @@ static void imuTask(void *arg)
     for (;;) {
         ImuData data;
         if (imuRead(&data)) {
+            taskENTER_CRITICAL(&s_imuMux);
             gApp.imuData = data;
             gApp.imuReady = true;
+            taskEXIT_CRITICAL(&s_imuMux);
 
             // Sensor fusion: 칼만 필터 predict (100Hz)
             if (gApp.fusionActive && axisCalibIsValid()) {
@@ -339,7 +376,9 @@ static void imuTask(void *arg)
                 if (fwdAccelMs2 < -19.6f) fwdAccelMs2 = -19.6f;
 
                 speedKfPredict(fwdAccelMs2, 0.01f);  // 10ms = 100Hz
+                taskENTER_CRITICAL(&s_imuMux);
                 gApp.fusedSpeedKmh = speedKfGetSpeedKmh();
+                taskEXIT_CRITICAL(&s_imuMux);
             }
         }
 
@@ -348,7 +387,9 @@ static void imuTask(void *arg)
             tempCounter = 0;
             float temp;
             if (imuReadTemperature(&temp)) {
+                taskENTER_CRITICAL(&s_imuMux);
                 gApp.imuData.temperature = temp;
+                taskEXIT_CRITICAL(&s_imuMux);
             }
         }
 
@@ -358,7 +399,7 @@ static void imuTask(void *arg)
 
 static void startImuTask(void)
 {
-    xTaskCreatePinnedToCore(imuTask, "imu", 4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(imuTask, "imu", 4096, NULL, 2, &s_imuTaskHandle, 1);
 }
 
 // ============================================================
@@ -499,6 +540,8 @@ void onLapComplete(unsigned long lapTimeMs) {
     // Finish recording and save
     StorableLap completedLap;
     if (finishRecordingLap(completedLap)) {
+        // 교차 시점 기준 정확한 랩타임으로 보정 (마지막 기록 포인트와 최대 100ms 차이)
+        completedLap.totalTimeMs = lapTimeMs;
         saveLap(completedLap);
 
         // Check if new best
@@ -729,6 +772,9 @@ static void app_init(void) {
     // SPIFFS에서 설정 로드 (phoneNumber 등)
     loadSettings();
 
+    // 이전에 감지한 타임존 복원 (없으면 UTC0 유지, GPS 위치 잡으면 갱신됨)
+    loadTzFromSpiffs();
+
     // SD 카드 디스플레이 설정 로드 (/sdcard/config/display.json, 없으면 디폴트)
     loadDisplayConfig();
 
@@ -911,6 +957,14 @@ static void main_task(void *pvParameters) {
         // Update display at fixed rate (~60Hz)
         unsigned long now = millis();
         if (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL_MS) {
+            // IMU 데이터 스냅샷 (same-core 레이스 보호)
+            taskENTER_CRITICAL(&s_imuMux);
+            ImuData imuSnap = gApp.imuData;
+            float fusedSnap = gApp.fusedSpeedKmh;
+            taskEXIT_CRITICAL(&s_imuMux);
+            gApp.imuData = imuSnap;
+            gApp.fusedSpeedKmh = fusedSnap;
+
             gPageManager.update();
             lastDisplayUpdate = now;
         }

@@ -510,6 +510,18 @@ static bool sendCfgValset(const CfgKeyValue* items, int count, uint8_t layers) {
     payload[pos++] = 0x00;    // reserved
 
     for (int i = 0; i < count; i++) {
+        // size 유효성 검사 (1/2/4만 허용)
+        if (items[i].size != 1 && items[i].size != 2 && items[i].size != 4) {
+            ESP_LOGE(TAG, "CFG-VALSET invalid size: %d", items[i].size);
+            return false;
+        }
+
+        // 경계 체크: 기록 전에 수행 (key 4바이트 + value size 바이트)
+        if (pos + 4 + items[i].size > (int)sizeof(payload)) {
+            ESP_LOGE(TAG, "CFG-VALSET payload overflow");
+            return false;
+        }
+
         // Key ID (4 bytes, little-endian)
         payload[pos++] = (items[i].key >>  0) & 0xFF;
         payload[pos++] = (items[i].key >>  8) & 0xFF;
@@ -520,11 +532,6 @@ static bool sendCfgValset(const CfgKeyValue* items, int count, uint8_t layers) {
         uint32_t val = items[i].value;
         for (int b = 0; b < items[i].size; b++) {
             payload[pos++] = (val >> (b * 8)) & 0xFF;
-        }
-
-        if (pos >= (int)sizeof(payload) - 8) {
-            ESP_LOGE(TAG, "CFG-VALSET payload overflow");
-            return false;
         }
     }
 

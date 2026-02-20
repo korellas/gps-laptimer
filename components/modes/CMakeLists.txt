@@ -6,6 +6,7 @@ idf_component_register(
         "."
     REQUIRES
         esp_timer
+        freertos
         geo
         track
         timing
