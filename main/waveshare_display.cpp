@@ -17,6 +17,7 @@
 #include "ble_ota.h"
 #include "wifi_portal.h"
 #include "display_config.h"
+#include "sensor_fusion.h"
 
 #include <cstring>
 #include <cstdio>
@@ -44,6 +45,7 @@
 LV_FONT_DECLARE(share_tech_mono_24);
 LV_FONT_DECLARE(share_tech_mono_32);
 LV_FONT_DECLARE(share_tech_mono_56);
+LV_FONT_DECLARE(share_tech_mono_72);
 
 static const char *TAG = "DISPLAY";
 
@@ -131,6 +133,7 @@ static lv_obj_t *lbl_laptime = NULL;
 static lv_obj_t *lbl_lapnum = NULL;
 static lv_obj_t *lbl_best = NULL;
 static lv_obj_t *lbl_delta = NULL;
+static lv_obj_t *lbl_center_unit = NULL;  // "km/h" unit label (speed mode only)
 static lv_obj_t *lbl_speed_delta = NULL;
 static lv_obj_t *bar_bg = NULL;
 static lv_obj_t *bar_up = NULL;
@@ -157,6 +160,33 @@ static lv_obj_t *gps_status_labels[GPS_STATUS_LINE_COUNT] = {};
 static lv_obj_t *lap_complete_overlay = NULL;
 static lv_obj_t *lap_complete_time_label = NULL;
 static lv_obj_t *lap_complete_border = NULL;
+
+// ── Lap Summary page overlay ──
+#define SUMMARY_ROWS        7   // 1 header + 6 data rows
+#define SUMMARY_SEC_COLS    6   // sector columns visible at once
+#define SUMMARY_TOTAL_COLS 10   // LAP + TIME + S0..S5 + MIN + MAX
+
+static lv_obj_t* s_summaryOverlay = NULL;
+static lv_obj_t* s_summaryCells[SUMMARY_ROWS][SUMMARY_TOTAL_COLS] = {};
+
+// ── IMU Status page overlay ──
+static lv_obj_t* s_imuOverlay = NULL;
+static lv_obj_t* s_gfDot = NULL;          // G-force moving dot
+static constexpr int GF_SIZE = 160;       // G-force circle area (px)
+static constexpr float GF_SCALE = 65.0f;  // pixels per 1G
+static constexpr int IMU_INFO_LINES = 5;
+static lv_obj_t* s_imuLabels[IMU_INFO_LINES] = {};
+static lv_obj_t* s_zBar = NULL;            // Z-axis vertical bar container
+static lv_obj_t* s_zDot = NULL;            // Z-axis moving dot
+static constexpr int ZB_HEIGHT = 160;      // Z bar height (matches G-force)
+static constexpr int ZB_WIDTH  = 16;       // Z bar width
+
+static const int SUMMARY_COL_X[SUMMARY_TOTAL_COLS] = {
+    4, 46, 132, 194, 256, 318, 380, 442, 506, 566
+};
+static const int SUMMARY_ROW_Y[SUMMARY_ROWS] = {
+    2, 28, 52, 76, 100, 124, 148
+};
 
 // Startup screen overlay (화면: STARTUP)
 static lv_obj_t *startup_overlay = NULL;
@@ -809,7 +839,7 @@ void setupUI(void)
     // Delta text - largest, centered (overlay on bar)
     lbl_delta = lv_label_create(scr);
     lv_obj_set_style_text_color(lbl_delta, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_delta, &share_tech_mono_56, 0);
+    lv_obj_set_style_text_font(lbl_delta, &share_tech_mono_72, 0);
     lv_obj_set_width(lbl_delta, 420);
     lv_obj_set_style_text_align(lbl_delta, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(lbl_delta, LV_ALIGN_CENTER, 0, 0);
@@ -821,6 +851,18 @@ void setupUI(void)
     lv_obj_set_style_text_font(lbl_speed_delta, &share_tech_mono_24, 0);
     lv_label_set_text(lbl_speed_delta, "+0.0km/h");
     lv_obj_add_flag(lbl_speed_delta, LV_OBJ_FLAG_HIDDEN);
+
+    // km/h unit label: shown alongside large speed number (speed mode only)
+    // x=+120: right of speed digits (3-digit right edge ~+56px from center)
+    // y=+8: bottom-aligns 56px font with 72px speed font ((72-56)/2 = 8)
+    lbl_center_unit = lv_label_create(scr);
+    lv_obj_set_style_text_color(lbl_center_unit, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl_center_unit, &share_tech_mono_56, 0);
+    lv_obj_set_width(lbl_center_unit, 130);
+    lv_obj_set_style_text_align(lbl_center_unit, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(lbl_center_unit, LV_ALIGN_CENTER, 120, 8);
+    lv_label_set_text(lbl_center_unit, "km/h");
+    lv_obj_add_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
 
     // ============================================================
     // MAIN UI ELEMENTS
@@ -904,7 +946,7 @@ void setupUI(void)
     // Lap completion time label (centered on overlay)
     lap_complete_time_label = lv_label_create(lap_complete_overlay);
     lv_obj_set_style_text_color(lap_complete_time_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lap_complete_time_label, &share_tech_mono_56, 0);
+    lv_obj_set_style_text_font(lap_complete_time_label, &share_tech_mono_72, 0);
     lv_obj_set_width(lap_complete_time_label, 420);
     lv_obj_set_style_text_align(lap_complete_time_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(lap_complete_time_label, LV_ALIGN_CENTER, 0, 0);
@@ -920,6 +962,147 @@ void setupUI(void)
     lv_obj_set_style_radius(lap_complete_border, 0, 0);
     lv_obj_set_style_pad_all(lap_complete_border, 0, 0);
     lv_obj_add_flag(lap_complete_border, LV_OBJ_FLAG_HIDDEN);
+
+    // ── Lap Summary overlay (full screen, hidden by default) ──
+    s_summaryOverlay = lv_obj_create(scr);
+    lv_obj_set_size(s_summaryOverlay, LCD_H_RES, LCD_V_RES);
+    lv_obj_set_pos(s_summaryOverlay, 0, 0);
+    lv_obj_set_style_bg_color(s_summaryOverlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_summaryOverlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_summaryOverlay, 0, 0);
+    lv_obj_set_style_pad_all(s_summaryOverlay, 0, 0);
+    lv_obj_set_style_radius(s_summaryOverlay, 0, 0);
+    lv_obj_add_flag(s_summaryOverlay, LV_OBJ_FLAG_HIDDEN);
+
+    // Create grid cells: row 0 = header (yellow), rows 1..6 = data (white)
+    for (int r = 0; r < SUMMARY_ROWS; r++) {
+        lv_color_t cellColor = (r == 0) ? lv_color_make(255, 220, 0) : lv_color_white();
+        for (int c = 0; c < SUMMARY_TOTAL_COLS; c++) {
+            lv_obj_t* lbl = lv_label_create(s_summaryOverlay);
+            lv_obj_set_style_text_color(lbl, cellColor, 0);
+            lv_obj_set_style_text_font(lbl, &share_tech_mono_24, 0);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_set_pos(lbl, SUMMARY_COL_X[c], SUMMARY_ROW_Y[r]);
+            lv_label_set_text(lbl, "");
+            s_summaryCells[r][c] = lbl;
+        }
+    }
+
+    // ── IMU Status overlay (full screen, hidden by default) ──
+    s_imuOverlay = lv_obj_create(scr);
+    lv_obj_set_size(s_imuOverlay, LCD_H_RES, LCD_V_RES);
+    lv_obj_set_pos(s_imuOverlay, 0, 0);
+    lv_obj_set_style_bg_color(s_imuOverlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_imuOverlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_imuOverlay, 0, 0);
+    lv_obj_set_style_pad_all(s_imuOverlay, 0, 0);
+    lv_obj_set_style_radius(s_imuOverlay, 0, 0);
+    lv_obj_clear_flag(s_imuOverlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_imuOverlay, LV_OBJ_FLAG_HIDDEN);
+
+    // G-force circle container
+    {
+        lv_obj_t* gc = lv_obj_create(s_imuOverlay);
+        lv_obj_set_size(gc, GF_SIZE, GF_SIZE);
+        lv_obj_set_pos(gc, 4, 6);
+        lv_obj_set_style_bg_color(gc, lv_color_make(10, 10, 10), 0);
+        lv_obj_set_style_bg_opa(gc, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(gc, 0, 0);
+        lv_obj_set_style_pad_all(gc, 0, 0);
+        lv_obj_set_style_radius(gc, 0, 0);
+        lv_obj_clear_flag(gc, LV_OBJ_FLAG_SCROLLABLE);
+
+        // Circle rings drawn as polylines (avoids expensive AA radius masks)
+        static constexpr int CIRCLE_SEGS = 48;
+        static lv_point_precise_t pts1g[CIRCLE_SEGS + 1];
+        static lv_point_precise_t pts05g[CIRCLE_SEGS + 1];
+        float cx = GF_SIZE / 2.0f;
+        float cy = GF_SIZE / 2.0f;
+        for (int i = 0; i <= CIRCLE_SEGS; i++) {
+            float a = 6.2831853f * i / CIRCLE_SEGS;
+            float ca = cosf(a), sa = sinf(a);
+            pts1g[i].x  = (int)(cx + GF_SCALE * ca);
+            pts1g[i].y  = (int)(cy + GF_SCALE * sa);
+            pts05g[i].x = (int)(cx + (GF_SCALE * 0.5f) * ca);
+            pts05g[i].y = (int)(cy + (GF_SCALE * 0.5f) * sa);
+        }
+
+        // 1G ring
+        lv_obj_t* line1g = lv_line_create(gc);
+        lv_line_set_points(line1g, pts1g, CIRCLE_SEGS + 1);
+        lv_obj_set_style_line_color(line1g, lv_color_make(80, 80, 80), 0);
+        lv_obj_set_style_line_width(line1g, 1, 0);
+
+        // 0.5G ring
+        lv_obj_t* line05g = lv_line_create(gc);
+        lv_line_set_points(line05g, pts05g, CIRCLE_SEGS + 1);
+        lv_obj_set_style_line_color(line05g, lv_color_make(50, 50, 50), 0);
+        lv_obj_set_style_line_width(line05g, 1, 0);
+
+        // Crosshairs
+        static lv_point_precise_t hpts[] = {{0, GF_SIZE / 2}, {GF_SIZE, GF_SIZE / 2}};
+        lv_obj_t* lH = lv_line_create(gc);
+        lv_line_set_points(lH, hpts, 2);
+        lv_obj_set_style_line_color(lH, lv_color_make(50, 50, 50), 0);
+        lv_obj_set_style_line_width(lH, 1, 0);
+
+        static lv_point_precise_t vpts[] = {{GF_SIZE / 2, 0}, {GF_SIZE / 2, GF_SIZE}};
+        lv_obj_t* lV = lv_line_create(gc);
+        lv_line_set_points(lV, vpts, 2);
+        lv_obj_set_style_line_color(lV, lv_color_make(50, 50, 50), 0);
+        lv_obj_set_style_line_width(lV, 1, 0);
+
+        // Moving dot (8x8 square — no radius to avoid AA mask cost)
+        s_gfDot = lv_obj_create(gc);
+        lv_obj_set_size(s_gfDot, 8, 8);
+        lv_obj_set_style_radius(s_gfDot, 0, 0);
+        lv_obj_set_style_bg_color(s_gfDot, lv_color_make(0, 230, 0), 0);
+        lv_obj_set_style_bg_opa(s_gfDot, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_gfDot, 0, 0);
+        lv_obj_clear_flag(s_gfDot, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(s_gfDot, GF_SIZE / 2 - 4, GF_SIZE / 2 - 4);
+    }
+
+    // IMU info labels (5 lines, 24pt)
+    for (int i = 0; i < IMU_INFO_LINES; i++) {
+        s_imuLabels[i] = lv_label_create(s_imuOverlay);
+        lv_obj_set_style_text_font(s_imuLabels[i], &share_tech_mono_24, 0);
+        lv_obj_set_style_text_color(s_imuLabels[i],
+            (i == 0) ? lv_color_make(255, 220, 0) : lv_color_white(), 0);
+        lv_obj_set_pos(s_imuLabels[i], 196, 8 + i * 32);
+        lv_label_set_text(s_imuLabels[i], "");
+    }
+
+    // Z-axis vertical bar (lightweight replacement for chart)
+    {
+        s_zBar = lv_obj_create(s_imuOverlay);
+        lv_obj_set_size(s_zBar, ZB_WIDTH, ZB_HEIGHT);
+        lv_obj_set_pos(s_zBar, 170, 6);
+        lv_obj_set_style_bg_color(s_zBar, lv_color_make(15, 15, 15), 0);
+        lv_obj_set_style_bg_opa(s_zBar, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(s_zBar, lv_color_make(60, 60, 60), 0);
+        lv_obj_set_style_border_width(s_zBar, 1, 0);
+        lv_obj_set_style_radius(s_zBar, 0, 0);
+        lv_obj_set_style_pad_all(s_zBar, 0, 0);
+        lv_obj_clear_flag(s_zBar, LV_OBJ_FLAG_SCROLLABLE);
+
+        // Center line (0G mark)
+        static lv_point_precise_t zMidPts[] = {{0, ZB_HEIGHT / 2}, {ZB_WIDTH, ZB_HEIGHT / 2}};
+        lv_obj_t* zMidLine = lv_line_create(s_zBar);
+        lv_line_set_points(zMidLine, zMidPts, 2);
+        lv_obj_set_style_line_color(zMidLine, lv_color_make(80, 80, 80), 0);
+        lv_obj_set_style_line_width(zMidLine, 1, 0);
+
+        // Z dot (cyan, 8x8 square)
+        s_zDot = lv_obj_create(s_zBar);
+        lv_obj_set_size(s_zDot, 10, 8);
+        lv_obj_set_style_radius(s_zDot, 0, 0);
+        lv_obj_set_style_bg_color(s_zDot, lv_color_make(0, 200, 255), 0);
+        lv_obj_set_style_bg_opa(s_zDot, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_zDot, 0, 0);
+        lv_obj_clear_flag(s_zDot, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(s_zDot, 3, ZB_HEIGHT / 2 - 4);
+    }
 
     xSemaphoreGive(lvgl_mutex);
 
@@ -951,7 +1134,7 @@ void updateLapData(void)
         // GPS 속도 (gApp.currentPoint는 gps_processor에서 GPS 수신 시마다 업데이트)
         int speedKmh = (int)gApp.currentPoint.speedKmh;
         char speedBuf[16];
-        snprintf(speedBuf, sizeof(speedBuf), "%d km/h", speedKmh);
+        snprintf(speedBuf, sizeof(speedBuf), "%d", speedKmh);
 
         // 하단 텍스트: 트랙 식별됨이면 트랙 이름, 아니면 현재 시각
         char bottomBuf[72] = "";
@@ -965,7 +1148,7 @@ void updateLapData(void)
             // 트랙 이름 표시
             snprintf(bottomBuf, sizeof(bottomBuf), ">> %s <<", s_preTrackName);
         } else {
-            // PRE_TRACK: 현재 시각 (HH:MM:SS)
+            // PRE_TRACK: 현재 시각 (TZ env var 기준 로컬 시각)
             time_t now_t = time(nullptr);
             struct tm tmInfo = {};
             localtime_r(&now_t, &tmInfo);
@@ -974,7 +1157,8 @@ void updateLapData(void)
         }
 
         if (lvgl_lock(10)) {
-            if (lbl_delta)    lv_label_set_text(lbl_delta, speedBuf);
+            if (lbl_delta)       lv_label_set_text(lbl_delta, speedBuf);
+            if (lbl_center_unit) lv_obj_clear_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
             if (lbl_datetime) {
                 lv_label_set_text(lbl_datetime, bottomBuf);
                 lv_obj_clear_flag(lbl_datetime, LV_OBJ_FLAG_HIDDEN);
@@ -1264,6 +1448,14 @@ void updateLapData(void)
         strncpy(cache.delta, centerText, sizeof(cache.delta) - 1);
     }
     lv_obj_clear_flag(lbl_delta, LV_OBJ_FLAG_HIDDEN);
+
+    // km/h unit label: only in speed mode
+    if (lbl_center_unit) {
+        if (effectiveCenter == CenterContent::SPEED)
+            lv_obj_clear_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // Sector deltas
     if (showSectors) {
@@ -1889,8 +2081,45 @@ void applyPageVisibilityForPage(PageId pageId)
     if (startup_overlay) lv_obj_add_flag(startup_overlay, LV_OBJ_FLAG_HIDDEN);
     if (phone_overlay) lv_obj_add_flag(phone_overlay, LV_OBJ_FLAG_HIDDEN);
 
-    bool isGpsPage  = (pageId == PageId::GPS_STATUS);
-    bool isPreTrack = (pageId == PageId::PRE_TRACK);
+    bool isGpsPage   = (pageId == PageId::GPS_STATUS || pageId == PageId::STORAGE_TEST);
+    bool isPreTrack  = (pageId == PageId::PRE_TRACK);
+    bool isSummary   = (pageId == PageId::LAP_SUMMARY);
+    bool isImuPage   = (pageId == PageId::IMU_STATUS);
+
+    // Lap summary overlay: show only on LAP_SUMMARY page
+    if (s_summaryOverlay) {
+        if (isSummary) lv_obj_clear_flag(s_summaryOverlay, LV_OBJ_FLAG_HIDDEN);
+        else           lv_obj_add_flag(s_summaryOverlay, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // IMU overlay: show only on IMU_STATUS page
+    if (s_imuOverlay) {
+        if (isImuPage) lv_obj_clear_flag(s_imuOverlay, LV_OBJ_FLAG_HIDDEN);
+        else           lv_obj_add_flag(s_imuOverlay, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // On fullscreen overlay pages, hide all main UI elements and return early
+    if (isSummary || isImuPage) {
+        lv_obj_t *allElements[] = {
+            bar_bg, lbl_delta, lbl_lapnum, lbl_laptime, lbl_best,
+            lbl_speed_delta, lbl_datetime, lbl_notification, lbl_center_unit
+        };
+        for (auto el : allElements) {
+            if (el) lv_obj_add_flag(el, LV_OBJ_FLAG_HIDDEN);
+        }
+        for (int i = 0; i < 3; i++) {
+            if (lbl_sector_deltas[i]) lv_obj_add_flag(lbl_sector_deltas[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        for (int i = 0; i < GPS_STATUS_LINE_COUNT; i++) {
+            if (gps_status_labels[i]) lv_obj_add_flag(gps_status_labels[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        xSemaphoreGive(lvgl_mutex);
+        memset(s_gpsStatusCache, 0, sizeof(s_gpsStatusCache));
+        memset(&cache, 0, sizeof(cache));
+        cache.lastBarValue = -9999;
+        cache.lastLowBat = -1;
+        return;
+    }
 
     // Main UI elements: hidden on GPS_STATUS and PRE_TRACK (except lbl_delta for speed)
     lv_obj_t *mainElements[] = {
@@ -1914,6 +2143,13 @@ void applyPageVisibilityForPage(PageId pageId)
         }
     }
 
+    // km/h unit label: show on PRE_TRACK (always speed), hide elsewhere
+    // (SESSION update will show/hide based on effectiveCenter == SPEED)
+    if (lbl_center_unit) {
+        if (isPreTrack) lv_obj_clear_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
+        else            lv_obj_add_flag(lbl_center_unit, LV_OBJ_FLAG_HIDDEN);
+    }
+
     // GPS Status labels: only visible on GPS_STATUS page
     for (int i = 0; i < GPS_STATUS_LINE_COUNT; i++) {
         if (!gps_status_labels[i]) continue;
@@ -1935,6 +2171,15 @@ void applyPageVisibilityForPage(PageId pageId)
     cache.lastLowBat = -1;
 }
 
+void setGpsStatusLine(int line, const char* text)
+{
+    if (line < 0 || line >= GPS_STATUS_LINE_COUNT || !gps_status_labels[line]) return;
+    if (lvglLock(10)) {
+        lv_label_set_text(gps_status_labels[line], text ? text : "");
+        lvglUnlock();
+    }
+}
+
 void updateGpsStatusDisplay(void)
 {
     updateGpsStatusPage();
@@ -1953,6 +2198,124 @@ void updatePreTrackDisplay(const char* trackName)
     updateLapData();
 }
 
+// ── 랩 서머리 표시 ──
+// lapRowOffset  : 상단에 표시할 첫 번째 랩 인덱스 (sorted rank 기준)
+// sectorColOffset: 섹터 열 스크롤 오프셋 (0 = 첫 번째 섹터부터)
+void updateLapSummaryDisplay(int lapRowOffset, int sectorColOffset)
+{
+    if (!s_summaryOverlay) return;
+    if (xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+
+    const int lapCount = gApp.sessionLapCount;
+    if (lapCount == 0) {
+        // 데이터 없음 — 간단한 안내 메시지
+        lv_label_set_text(s_summaryCells[0][0], "NO LAPS");
+        for (int r = 0; r < SUMMARY_ROWS; r++) {
+            for (int c = 0; c < SUMMARY_TOTAL_COLS; c++) {
+                if (r != 0 || c != 0) lv_label_set_text(s_summaryCells[r][c], "");
+            }
+        }
+        xSemaphoreGive(lvgl_mutex);
+        return;
+    }
+
+    // 베스트 랩 기준 정렬 (인덱스 배열, 최대 30개)
+    static int sortIdx[AppContext::MAX_SESSION_LAPS];
+    int n = lapCount;
+    for (int i = 0; i < n; i++) sortIdx[i] = i;
+    // 삽입 정렬 (랩 수가 적으므로 충분)
+    for (int i = 1; i < n; i++) {
+        int key = sortIdx[i];
+        uint32_t keyTime = gApp.sessionLaps[key].lapTimeMs;
+        int j = i - 1;
+        while (j >= 0 && gApp.sessionLaps[sortIdx[j]].lapTimeMs > keyTime) {
+            sortIdx[j + 1] = sortIdx[j];
+            j--;
+        }
+        sortIdx[j + 1] = key;
+    }
+
+    // 섹터 수 확인 (유효한 첫 번째 랩 기준)
+    int sectorCount = 0;
+    for (int i = 0; i < n; i++) {
+        if (gApp.sessionLaps[i].sectorCount > sectorCount) {
+            sectorCount = gApp.sessionLaps[i].sectorCount;
+        }
+    }
+
+    char buf[32];
+
+    // ── 헤더 행 (row 0) ──
+    lv_label_set_text(s_summaryCells[0][0], "LAP");
+    lv_label_set_text(s_summaryCells[0][1], "TIME");
+    for (int sc = 0; sc < SUMMARY_SEC_COLS; sc++) {
+        int sectorIdx = sc + sectorColOffset;
+        if (sectorIdx < sectorCount) {
+            snprintf(buf, sizeof(buf), "S%d", sectorIdx + 1);
+            lv_label_set_text(s_summaryCells[0][2 + sc], buf);
+        } else {
+            lv_label_set_text(s_summaryCells[0][2 + sc], "");
+        }
+    }
+    lv_label_set_text(s_summaryCells[0][8], "MIN");
+    lv_label_set_text(s_summaryCells[0][9], "MAX");
+
+    // ── 데이터 행 ──
+    for (int row = 1; row < SUMMARY_ROWS; row++) {
+        int rank = (row - 1) + lapRowOffset;
+        if (rank >= n) {
+            // 빈 행 클리어
+            for (int c = 0; c < SUMMARY_TOTAL_COLS; c++) {
+                lv_label_set_text(s_summaryCells[row][c], "");
+            }
+            continue;
+        }
+
+        const LapSummaryEntry& lap = gApp.sessionLaps[sortIdx[rank]];
+
+        // 최고 랩(rank 0)은 색상 강조
+        lv_color_t rowColor = (rank == 0) ? lv_color_make(80, 255, 80) : lv_color_white();
+        for (int c = 0; c < SUMMARY_TOTAL_COLS; c++) {
+            lv_obj_set_style_text_color(s_summaryCells[row][c], rowColor, 0);
+        }
+
+        // LAP 번호
+        snprintf(buf, sizeof(buf), "L%02d", lap.lapNumber);
+        lv_label_set_text(s_summaryCells[row][0], buf);
+
+        // 랩 타임 (M:SS.s 형식)
+        uint32_t ms = lap.lapTimeMs;
+        uint32_t min = ms / 60000;
+        uint32_t sec = (ms % 60000) / 1000;
+        uint32_t dec = (ms % 1000) / 100;
+        snprintf(buf, sizeof(buf), "%lu:%02lu.%lu", (unsigned long)min, (unsigned long)sec, (unsigned long)dec);
+        lv_label_set_text(s_summaryCells[row][1], buf);
+
+        // 섹터 타임 (SS.s 형식, 스크롤 적용)
+        for (int sc = 0; sc < SUMMARY_SEC_COLS; sc++) {
+            int sectorIdx = sc + sectorColOffset;
+            if (sectorIdx < sectorCount && sectorIdx < lap.sectorCount
+                    && lap.sectorTimesMs[sectorIdx] > 0) {
+                uint32_t sms = lap.sectorTimesMs[sectorIdx];
+                uint32_t ss = sms / 1000;
+                uint32_t sd = (sms % 1000) / 100;
+                snprintf(buf, sizeof(buf), "%lu.%lu", (unsigned long)ss, (unsigned long)sd);
+                lv_label_set_text(s_summaryCells[row][2 + sc], buf);
+            } else {
+                lv_label_set_text(s_summaryCells[row][2 + sc], "");
+            }
+        }
+
+        // MIN / MAX 속도 (정수 km/h)
+        snprintf(buf, sizeof(buf), "%3d", (int)lap.minSpeedKmh);
+        lv_label_set_text(s_summaryCells[row][8], buf);
+        snprintf(buf, sizeof(buf), "%3d", (int)lap.maxSpeedKmh);
+        lv_label_set_text(s_summaryCells[row][9], buf);
+    }
+
+    xSemaphoreGive(lvgl_mutex);
+}
+
 void updateLaptimerDisplay(int userPageIndex)
 {
     s_preTrackMode = false;
@@ -1968,5 +2331,104 @@ void updateLaptimerTimeDisplay(void)
 void updateLaptimerGpsDisplay(void)
 {
     updateGpsData();
+}
+
+// ============================================================
+// IMU STATUS PAGE
+// ============================================================
+
+void updateImuDisplay(void)
+{
+    if (!s_imuOverlay) return;
+
+    // Read calibrated IMU accel (g units)
+    float ax = gApp.imuData.accelX;
+    float ay = gApp.imuData.accelY;
+    float az = gApp.imuData.accelZ;
+
+    // Remove gravity
+    float gx = gApp.imuCalibration.gravityX;
+    float gy = gApp.imuCalibration.gravityY;
+    float gz = gApp.imuCalibration.gravityZ;
+    float dx = ax - gx;
+    float dy = ay - gy;
+    float dz = az - gz;
+
+    float fwdG = 0, latG = 0, vertG = 0;
+    bool calibrated = axisCalibIsValid();
+
+    // Get GPS heading for forward/lateral projection
+    UBloxData ubx = getUBloxData();
+    bool hasHeading = (ubx.valid && ubx.speedKmh > 5.0f);
+
+    if (calibrated) {
+        const float* R = axisCalibGetR();
+        float aN = R[0] * dx + R[1] * dy + R[2] * dz;  // North (g)
+        float aE = R[3] * dx + R[4] * dy + R[5] * dz;  // East (g)
+        float aD = R[6] * dx + R[7] * dy + R[8] * dz;  // Down (g)
+
+        if (hasHeading) {
+            float h = ubx.headingDeg * (3.14159265f / 180.0f);
+            fwdG =  aN * cosf(h) + aE * sinf(h);
+            latG = -aN * sinf(h) + aE * cosf(h);
+        } else {
+            fwdG = aN;  // North as forward when no heading
+            latG = aE;  // East as lateral
+        }
+        vertG = aD;
+    } else {
+        // Uncalibrated: raw sensor axes (arbitrary orientation)
+        fwdG = dy;
+        latG = dx;
+        vertG = dz;
+    }
+
+    // G-force dot position (center = 0G, scale = GF_SCALE px/G)
+    int dotCX = GF_SIZE / 2 + (int)(latG * GF_SCALE);
+    int dotCY = GF_SIZE / 2 - (int)(fwdG * GF_SCALE);
+    if (dotCX < 4) dotCX = 4;
+    if (dotCX > GF_SIZE - 4) dotCX = GF_SIZE - 4;
+    if (dotCY < 4) dotCY = 4;
+    if (dotCY > GF_SIZE - 4) dotCY = GF_SIZE - 4;
+
+    // Z-axis dot position (center = 0G, ±0.5G full range)
+    int zDotY = ZB_HEIGHT / 2 - (int)(vertG * (ZB_HEIGHT / 1.0f));
+    if (zDotY < 0) zDotY = 0;
+    if (zDotY > ZB_HEIGHT - 8) zDotY = ZB_HEIGHT - 8;
+
+    // Prepare info text (avoid snprintf inside mutex)
+    char line1[40], line2[40], line3[40], line4[40];
+
+    if (calibrated) {
+        snprintf(line1, sizeof(line1), "Cal:OK  N=%d", axisCalibGetSampleCount());
+        snprintf(line2, sizeof(line2), "RMS: %.2f m/s2", axisCalibGetResidual());
+    } else {
+        snprintf(line1, sizeof(line1), "Cal:--  N=%d", axisCalibGetSampleCount());
+        snprintf(line2, sizeof(line2), "RMS: --");
+    }
+    snprintf(line3, sizeof(line3), "G:%.2f %.2f %.2f", gx, gy, gz);
+    snprintf(line4, sizeof(line4), "F:%+.2f L:%+.2f Z:%+.3f", fwdG, latG, vertG);
+
+    // Throttle: labels update at ~10Hz (every 6th call), dots at full rate
+    static int s_imuFrameCount = 0;
+    s_imuFrameCount++;
+    bool slowUpdate = (s_imuFrameCount % 6 == 0);
+
+    // LVGL updates
+    if (!lvglLock(10)) return;
+
+    // Dot positions (every frame — smooth movement)
+    lv_obj_set_pos(s_gfDot, dotCX - 4, dotCY - 4);
+    lv_obj_set_pos(s_zDot, 3, zDotY);
+
+    if (slowUpdate) {
+        lv_label_set_text(s_imuLabels[0], "IMU STATUS");
+        lv_label_set_text(s_imuLabels[1], line1);
+        lv_label_set_text(s_imuLabels[2], line2);
+        lv_label_set_text(s_imuLabels[3], line3);
+        lv_label_set_text(s_imuLabels[4], line4);
+    }
+
+    lvglUnlock();
 }
 

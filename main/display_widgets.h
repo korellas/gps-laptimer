@@ -75,6 +75,16 @@ void updateLaptimerGpsDisplay(void);
 
 // ── GPS Status page update ──
 void updateGpsStatusDisplay(void);
+// Write a single line to GPS-status labels (0-4); used by storage test page
+void setGpsStatusLine(int line, const char* text);
 
 // ── Pre-track display ──
 void updatePreTrackDisplay(const char* trackName);
+
+// ── Lap summary page display ──
+// lapRowOffset: first rank to show (0 = best lap at top)
+// sectorColOffset: first sector column index (for horizontal scroll)
+void updateLapSummaryDisplay(int lapRowOffset, int sectorColOffset);
+
+// ── IMU Status page display ──
+void updateImuDisplay(void);

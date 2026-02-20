@@ -79,24 +79,59 @@ static inline uint32_t millis(void) {
 }
 
 static constexpr time_t MIN_VALID_UTC_EPOCH = 1704067200;  // 2024-01-01 00:00:00 UTC
-// OS=1(시간 무결성 손실) 감지 시 true → rtcWrite() 성공 후 false로 리셋
-static bool s_rtcOsInvalid = false;
+
+// ============================================================
+// TIMEZONE SUPPORT
+// ============================================================
+
+// TZ-independent UTC struct tm → POSIX epoch (mktime uses TZ env var, this does not)
+static time_t utcEpochFromTm(const struct tm* t) {
+    int y = t->tm_year + 1900;
+    int m = t->tm_mon + 1;
+    if (m <= 2) { m += 12; y -= 1; }
+    int era = y / 400;
+    int yoe = y - era * 400;
+    int doy = (153 * (m - 3) + 2) / 5 + t->tm_mday - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    time_t days = (time_t)era * 146097 + doe - 719468;
+    return days * 86400 + t->tm_hour * 3600 + t->tm_min * 60 + t->tm_sec;
+}
+
+// Bounding-box timezone table (POSIX TZ strings, no external data file needed)
+struct TzRegion { float latMin, latMax, lonMin, lonMax; const char* posixTz; };
+static const TzRegion s_tzTable[] = {
+    { 33.0f, 39.0f, 124.0f, 130.0f, "KST-9"                        },  // 한국
+    { 30.0f, 46.0f, 130.0f, 146.0f, "JST-9"                        },  // 일본
+    { 42.0f, 56.0f,  -5.0f,  18.0f, "CET-1CEST,M3.5.0,M10.5.0/3"  },  // 독일·프랑스·벨기에 등
+    { 49.0f, 61.0f,  -8.0f,   2.0f, "GMT0BST,M3.5.0/1,M10.5.0"    },  // 영국·아일랜드
+    { 24.0f, 48.0f, -82.0f, -66.0f, "EST5EDT,M3.2.0,M11.1.0"      },  // 미국 동부
+    { 25.0f, 50.0f,-104.0f, -82.0f, "CST6CDT,M3.2.0,M11.1.0"      },  // 미국 중부
+    { 31.0f, 50.0f,-116.0f,-104.0f, "MST7MDT,M3.2.0,M11.1.0"      },  // 미국 산악
+    { 32.0f, 50.0f,-128.0f,-116.0f, "PST8PDT,M3.2.0,M11.1.0"      },  // 미국 서부
+};
+
+static bool s_tzDetected = false;
+
+static void applyTimezoneFromPosition(float lat, float lon) {
+    for (const auto& r : s_tzTable) {
+        if (lat >= r.latMin && lat <= r.latMax && lon >= r.lonMin && lon <= r.lonMax) {
+            setenv("TZ", r.posixTz, 1);
+            tzset();
+            ESP_LOGI(TAG, "Timezone: %s (lat=%.2f lon=%.2f)", r.posixTz, (double)lat, (double)lon);
+            return;
+        }
+    }
+    // 테이블 미매칭 시 경도 기반 근사 (DST 미적용)
+    int off = (int)roundf(lon / 15.0f);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "UTC%+d", -off);
+    setenv("TZ", buf, 1);
+    tzset();
+    ESP_LOGW(TAG, "Timezone fallback: %s (lat=%.2f lon=%.2f)", buf, (double)lat, (double)lon);
+}
 
 static bool isSystemClockValidUtc(time_t nowUtc) {
     return nowUtc >= MIN_VALID_UTC_EPOCH;
-}
-
-static bool readValidRtcUtc(struct tm* outUtc) {
-    if (!outUtc || !rtcIsReady() || s_rtcOsInvalid) return false;
-
-    struct tm rtcTime = {};
-    if (!rtcRead(&rtcTime) || rtcTime.tm_year < (2024 - 1900)) {
-        s_rtcOsInvalid = true;  // OS=1: rtcWrite() 전까지 폴링 중단
-        return false;
-    }
-
-    *outUtc = rtcTime;
-    return true;
 }
 
 // ============================================================
@@ -283,17 +318,25 @@ static void imuTask(void *arg)
             // Sensor fusion: 칼만 필터 predict (100Hz)
             if (gApp.fusionActive && axisCalibIsValid()) {
                 const float* R = axisCalibGetR();
-                float ax = data.accelX, ay = data.accelY, az = data.accelZ;
+                const ImuCalibration& cal = gApp.imuCalibration;
 
-                // 센서 → NED 회전: aNED = R * aSensor
+                // 중력 제거: kinematic acceleration만 추출 (g 단위)
+                float ax = data.accelX - cal.gravityX;
+                float ay = data.accelY - cal.gravityY;
+                float az = data.accelZ - cal.gravityZ;
+
+                // 센서 → NED 회전: aNED = R * aSensor_kinematic
                 float aN = R[0]*ax + R[1]*ay + R[2]*az;
                 float aE = R[3]*ax + R[4]*ay + R[5]*az;
-                // R[6..8] = down axis (속도 퓨전에는 불필요)
 
                 // GPS heading 방향으로 투영 → 전진 가속도
                 float h = gApp.lastGpsHeadingRad;
                 float fwdAccelG = aN * cosf(h) + aE * sinf(h);
                 float fwdAccelMs2 = fwdAccelG * 9.80665f;
+
+                // 물리적 한계 clamp (±2g = ±19.6 m/s²)
+                if (fwdAccelMs2 > 19.6f) fwdAccelMs2 = 19.6f;
+                if (fwdAccelMs2 < -19.6f) fwdAccelMs2 = -19.6f;
 
                 speedKfPredict(fwdAccelMs2, 0.01f);  // 10ms = 100Hz
                 gApp.fusedSpeedKmh = speedKfGetSpeedKmh();
@@ -375,51 +418,32 @@ void updateDisplayData(const GPSPoint& point, const DeltaResult& delta,
     lframe.pts = gApp.referenceLap.points.size();
 
     // 시스템 시계에서 KST(UTC+9) 시간 표시 — 1초에 1번만 업데이트
-    // Time display source policy:
-    // 1) Prefer RTC whenever RTC holds valid time (OS=0).
-    // 2) OS=1이면 rtcWrite() 전까지 RTC 읽기 생략, system clock fallback.
-    // 3) Otherwise keep time hidden.
+    // 시스템 시계(UTC)를 TZ 환경변수에 맞게 로컬 시각으로 변환하여 표시
+    // - 부팅 시 RTC/GPS가 시스템 시계를 설정하고 TZ는 GPS 위치 확정 후 갱신됨
     static unsigned long lastTimeUpdateMs = 0;
     unsigned long nowMs = millis();
     if (nowMs - lastTimeUpdateMs >= 1000) {
         lastTimeUpdateMs = nowMs;
 
-        struct tm utcSource = {};
-        bool hasRtcTime = readValidRtcUtc(&utcSource);
-
-        if (hasRtcTime) {
+        time_t utcEpoch = 0;
+        time(&utcEpoch);
+        if (isSystemClockValidUtc(utcEpoch)) {
             gApp.gpsTimeSet = true;
-            time_t utc = mktime(&utcSource);
-            utc += 9 * 3600;  // UTC -> KST
-            struct tm kst = {};
-            gmtime_r(&utc, &kst);
-            tframe.hours   = kst.tm_hour;
-            tframe.minutes = kst.tm_min;
-            tframe.seconds = kst.tm_sec;
-            tframe.year    = kst.tm_year + 1900;
-            tframe.month   = kst.tm_mon + 1;
-            tframe.date    = kst.tm_mday;
+            struct tm local = {};
+            localtime_r(&utcEpoch, &local);
+            tframe.hours   = local.tm_hour;
+            tframe.minutes = local.tm_min;
+            tframe.seconds = local.tm_sec;
+            tframe.year    = local.tm_year + 1900;
+            tframe.month   = local.tm_mon + 1;
+            tframe.date    = local.tm_mday;
         } else {
-            time_t nowUtc = 0;
-            time(&nowUtc);
-            if (isSystemClockValidUtc(nowUtc)) {
-                nowUtc += 9 * 3600;  // UTC -> KST
-                struct tm kst = {};
-                gmtime_r(&nowUtc, &kst);
-                tframe.hours   = kst.tm_hour;
-                tframe.minutes = kst.tm_min;
-                tframe.seconds = kst.tm_sec;
-                tframe.year    = kst.tm_year + 1900;
-                tframe.month   = kst.tm_mon + 1;
-                tframe.date    = kst.tm_mday;
-            } else {
-                tframe.hours   = 0xFF;
-                tframe.minutes = 0;
-                tframe.seconds = 0;
-                tframe.year    = 0;
-                tframe.month   = 0;
-                tframe.date    = 0;
-            }
+            tframe.hours   = 0xFF;
+            tframe.minutes = 0;
+            tframe.seconds = 0;
+            tframe.year    = 0;
+            tframe.month   = 0;
+            tframe.date    = 0;
         }
     }
 
@@ -504,6 +528,24 @@ void onLapComplete(unsigned long lapTimeMs) {
             } else {
                 ESP_LOGW(TAG, "NEW BEST LAP! But reference conversion failed");
             }
+        }
+
+        // 랩 서머리 엔트리 저장 (섹터 타임 + 속도 통계)
+        // resetSectorTiming() 호출 전에 캡처해야 함
+        if (gApp.sessionLapCount < AppContext::MAX_SESSION_LAPS) {
+            LapSummaryEntry& entry = gApp.sessionLaps[gApp.sessionLapCount];
+            entry.lapNumber   = completedLapNumber;
+            entry.lapTimeMs   = lapTimeMs;
+            entry.maxSpeedKmh = completedLap.maxSpeedKmh;
+            entry.minSpeedKmh = completedLap.minSpeedKmh;
+            entry.valid       = true;
+
+            const CurrentSectorTiming& st = getCurrentSectorTiming();
+            entry.sectorCount = st.totalSectors;
+            for (int i = 0; i < st.totalSectors && i < 8; i++) {
+                entry.sectorTimesMs[i] = st.sectorCompleted[i] ? st.sectorTimes[i] : 0;
+            }
+            gApp.sessionLapCount++;
         }
     }
 
@@ -635,6 +677,10 @@ static void init_storage(void) {
 static void app_init(void) {
     LOG_INTRAM("boot");
 
+    // mktime/localtime_r 기준 타임존 초기화 (UTC0 = 위치 감지 전 기본값)
+    setenv("TZ", "UTC0", 1);
+    tzset();
+
     // 전원 래치 즉시 실행 (배터리 모드: 버튼 놓기 전에 SYS_EN 래치 필요)
     initPowerLatch();
 
@@ -708,7 +754,7 @@ static void app_init(void) {
     if (sensorBus && rtcInit(sensorBus)) {
         struct tm rtcTime = {};
         if (rtcRead(&rtcTime) && rtcTime.tm_year >= (2024 - 1900)) {
-            time_t utcEpoch = mktime(&rtcTime);
+            time_t utcEpoch = utcEpochFromTm(&rtcTime);
             struct timeval tv = { .tv_sec = utcEpoch, .tv_usec = 0 };
             settimeofday(&tv, NULL);
             gApp.gpsTimeSet = true;
@@ -805,10 +851,17 @@ static void checkPowerButton(void)
 static bool s_gpsClockSynced = false;
 
 static void syncGpsClockIfNeeded() {
-    if (s_gpsClockSynced) return;
     if (!isGPSModuleEnabled()) return;
 
     UBloxData ubx = getUBloxData();
+
+    // 위치 Fix 시 타임존 감지 (최초 1회, 시계 동기화와 독립적)
+    if (!s_tzDetected && ubx.valid && ubx.fixType >= 2) {
+        applyTimezoneFromPosition((float)ubx.lat, (float)ubx.lon);
+        s_tzDetected = true;
+    }
+
+    if (s_gpsClockSynced) return;
     if (!ubx.timeValid || ubx.year < 2024) return;
 
     struct tm gpsTime = {};
@@ -818,7 +871,7 @@ static void syncGpsClockIfNeeded() {
     gpsTime.tm_hour = ubx.hour;
     gpsTime.tm_min  = ubx.minute;
     gpsTime.tm_sec  = ubx.second;
-    time_t utcEpoch = mktime(&gpsTime);
+    time_t utcEpoch = utcEpochFromTm(&gpsTime);  // TZ-independent
     struct timeval tv = { .tv_sec = utcEpoch, .tv_usec = 0 };
     settimeofday(&tv, NULL);
     gApp.gpsTimeSet = true;
@@ -828,7 +881,6 @@ static void syncGpsClockIfNeeded() {
 
     // GPS 시간을 RTC에 저장 (다음 부팅 시 즉시 사용)
     if (rtcIsReady() && rtcWrite(&gpsTime)) {
-        s_rtcOsInvalid = false;  // OS bit 클리어됨, 다음 읽기 허용
         ESP_LOGI(TAG, "RTC synced from GPS");
     }
 }

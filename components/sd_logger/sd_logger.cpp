@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -31,25 +32,27 @@ static FILE* s_sessionFile = nullptr;
 // ── Helpers ──────────────────────────────────────────────────
 
 static bool mkdirp(const char* path) {
-    struct stat st = {};
-    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return true;
-    return mkdir(path, 0755) == 0;
+    // Skip stat() — its return value is unreliable on some FATFS VFS builds.
+    // Call mkdir() directly and treat EEXIST (already there) as success.
+    if (mkdir(path, 0755) == 0) return true;
+    if (errno == EEXIST) return true;
+    ESP_LOGW(TAG, "mkdir(%s) errno=%d", path, errno);
+    return false;
 }
 
 /**
- * Fill dateBuf (YYYY-MM-DD) and timeBuf (HH-MM-SS) from system clock (KST).
+ * Fill dateBuf (YYYY-MM-DD) and timeBuf (HH-MM-SS) from system clock (TZ env var 기준 로컬 시각).
  * Falls back to "0000-00-00" / "00-00-00" if time is not set.
  */
-static void getKstStrings(char* dateBuf, int dLen, char* timeBuf, int tLen) {
+static void getLocalTimeStrings(char* dateBuf, int dLen, char* timeBuf, int tLen) {
     time_t now = time(nullptr);
     if (now < 1704067200LL) {  // before 2024-01-01 UTC → time not set
         strncpy(dateBuf, "0000-00-00", dLen);
         strncpy(timeBuf, "00-00-00",   tLen);
         return;
     }
-    now += 9 * 3600;  // UTC → KST
     struct tm tm = {};
-    gmtime_r(&now, &tm);
+    localtime_r(&now, &tm);
     // Cast to unsigned + modulo so the compiler can prove the output length is bounded
     snprintf(dateBuf, dLen, "%04u-%02u-%02u",
              (unsigned)(tm.tm_year + 1900) % 10000u,
@@ -76,7 +79,7 @@ static bool openLogFileRolled(void) {
 
     s_logFile = fopen(path, "w");
     if (!s_logFile) {
-        ESP_LOGW(TAG, "Cannot open log: %s", path);
+        ESP_LOGW(TAG, "Cannot open log: %s  errno=%d", path, errno);
         return false;
     }
     fprintf(s_logFile,
@@ -98,7 +101,7 @@ bool sdLoggerInit(void) {
     s_rollCount = 0;
 
     char dateBuf[16], timeBuf[16];
-    getKstStrings(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
+    getLocalTimeStrings(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
     snprintf(s_logBasePath, sizeof(s_logBasePath),
              "/sdcard/logs/%s_%s", dateBuf, timeBuf);
 
@@ -125,7 +128,15 @@ void sdLogGPS(unsigned long ms,
                     fixType, sats,
                     state ? state : "?",
                     lapMs);
-    if (n > 0) s_logBytes += (size_t)n;
+    if (n > 0) {
+        s_logBytes += (size_t)n;
+        // Flush every 100 GPS writes (~10s at 10Hz) to ensure data survives power loss
+        static uint8_t s_flushCounter = 0;
+        if (++s_flushCounter >= 100) {
+            fflush(s_logFile);
+            s_flushCounter = 0;
+        }
+    }
     rollIfNeeded();
 }
 
@@ -163,7 +174,7 @@ bool sdSessionStart(void) {
     }
 
     char dateBuf[16], timeBuf[16];
-    getKstStrings(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
+    getLocalTimeStrings(dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
 
     char dirPath[64];
     snprintf(dirPath, sizeof(dirPath), "/sdcard/laps/%s", dateBuf);

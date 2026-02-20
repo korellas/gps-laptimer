@@ -31,6 +31,13 @@ extern "C" {
 void axisCalibInit(void);
 
 /**
+ * @brief Set the gravity vector in calibrated sensor frame (g units).
+ * Must be called before feeding samples. Obtained from boot calibration.
+ * e.g., [0, 0, 1.0] for Z-up mounting.
+ */
+void axisCalibSetGravity(float gx, float gy, float gz);
+
+/**
  * @brief Reset sample buffer only (keeps saved calibration valid).
  * Call when re-entering PRE_TRACK after a session reset.
  */

@@ -64,6 +64,9 @@ static float s_prevVelN = 0.0f, s_prevVelE = 0.0f, s_prevVelD = 0.0f;
 static uint32_t s_prevITOW = 0;
 static bool s_hasPrev = false;
 
+// Gravity vector in calibrated sensor frame (g units, set by axisCalibSetGravity)
+static float s_gravX = 0.0f, s_gravY = 0.0f, s_gravZ = 1.0f;
+
 // ============================================================
 // CALIBRATION RESULT
 // ============================================================
@@ -397,6 +400,14 @@ void axisCalibInit(void)
     // Don't clear s_R / s_calibValid — those may be loaded from SPIFFS
 }
 
+void axisCalibSetGravity(float gx, float gy, float gz)
+{
+    s_gravX = gx;
+    s_gravY = gy;
+    s_gravZ = gz;
+    ESP_LOGI(TAG, "Gravity set: [%.2f, %.2f, %.2f] g", gx, gy, gz);
+}
+
 void axisCalibReset(void)
 {
     s_sampleCount = 0;
@@ -447,11 +458,11 @@ bool axisCalibFeedGPS(float velNorthMps, float velEastMps, float velDownMps,
     float magNED = vec3Mag(aNED);
     if (magNED < CALIB_MIN_ACCEL_MAG || magNED > CALIB_MAX_ACCEL_MAG) return false;
 
-    // IMU sensor accel in m/s^2 (input is in g)
+    // IMU sensor accel: 중력 제거 후 m/s^2 변환 (input is in g, gravity in g)
     float aSensorMs2[3] = {
-        accelSensor[0] * G_MPS2,
-        accelSensor[1] * G_MPS2,
-        accelSensor[2] * G_MPS2
+        (accelSensor[0] - s_gravX) * G_MPS2,
+        (accelSensor[1] - s_gravY) * G_MPS2,
+        (accelSensor[2] - s_gravZ) * G_MPS2
     };
 
     float magSensor = vec3Mag(aSensorMs2);

@@ -70,6 +70,7 @@ struct StorableLap {
     uint32_t totalTimeMs;
     uint32_t startTimestamp;
     float maxSpeedKmh;
+    float minSpeedKmh;
     float avgSpeedKmh;
     uint16_t sessionId;
     uint16_t lapId;

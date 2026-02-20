@@ -314,8 +314,31 @@ struct ImuCalibration {
     float gyroOffsetX = 0.0f;
     float gyroOffsetY = 0.0f;
     float gyroOffsetZ = 0.0f;
+    // 캘리브레이션 후 정지 상태 잔여 중력 벡터 (g 단위)
+    // boot cal 후 정지 시 calibrated reading = gravity vector
+    float gravityX = 0.0f;
+    float gravityY = 0.0f;
+    float gravityZ = 1.0f;   // 기본: Z-up
     bool calibrated = false;
     int samplesUsed = 0;
+};
+
+// ============================================================
+// LAP SUMMARY ENTRY
+// ============================================================
+
+/**
+ * @brief Per-lap summary data collected on lap completion.
+ * Used by the lap summary page to display session results.
+ */
+struct LapSummaryEntry {
+    uint16_t lapNumber = 0;
+    uint32_t lapTimeMs = 0;
+    uint32_t sectorTimesMs[8] = {};  // MAX_SECTORS_PER_LAYOUT = 8
+    int sectorCount = 0;
+    float minSpeedKmh = 9999.0f;
+    float maxSpeedKmh = 0.0f;
+    bool valid = false;
 };
 
 // ============================================================
@@ -381,6 +404,11 @@ struct AppContext {
     bool  fusionInDR = false;         // GPS 없이 predict만 진행 중
     float lastGpsHeadingRad = 0.0f;   // 마지막 GPS heading (forward 투영용, rad)
     uint32_t fusionCalibDoneMs = 0;   // 캘리브레이션 완료 시각 (UI 알림용)
+
+    // Session lap summary (in-memory, populated on each lap completion)
+    static constexpr int MAX_SESSION_LAPS = 30;
+    LapSummaryEntry sessionLaps[MAX_SESSION_LAPS] = {};
+    int sessionLapCount = 0;
 
     // WiFi Portal settings (SPIFFS에 저장)
     char phoneNumber[32] = "";    // 전화번호 플레이트

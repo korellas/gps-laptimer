@@ -22,10 +22,13 @@ enum class PageId : uint8_t {
     BLE_OTA,
     SETTINGS,
     GPS_STATUS,
+    IMU_STATUS,
     PRE_TRACK,
     LAPTIMER,
     EMULATION,
     TRANSITION,
+    LAP_SUMMARY,
+    STORAGE_TEST,
     PAGE_COUNT
 };
 

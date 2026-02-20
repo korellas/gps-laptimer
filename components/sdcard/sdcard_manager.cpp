@@ -104,8 +104,9 @@ bool sdcardInit(void)
     ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
     sdmmc_card_print_info(stdout, s_card);
 
-    // laps ?�렉?�리 ?�성
+    // 필수 디렉토리 생성
     ensureDir("/sdcard/laps");
+    ensureDir("/sdcard/logs");
 
     return true;
 }
@@ -159,6 +160,7 @@ bool sdcardFormat(void)
         }
         s_mounted = true;
         ensureDir("/sdcard/laps");
+        ensureDir("/sdcard/logs");
         ESP_LOGI(TAG, "Format complete");
         return true;
     }

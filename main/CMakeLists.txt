@@ -14,6 +14,9 @@ idf_component_register(
         "pages/pre_track_page.cpp"
         "pages/laptimer_page.cpp"
         "pages/emulation_page.cpp"
+        "pages/lap_summary_page.cpp"
+        "pages/storage_test_page.cpp"
+        "pages/imu_page.cpp"
         "ublox_gps.cpp"
         "finish_line.cpp"
         "lap_storage.cpp"
@@ -21,6 +24,7 @@ idf_component_register(
         "../font/generated/share_tech_mono_24.c"
         "../font/generated/share_tech_mono_32.c"
         "../font/generated/share_tech_mono_56.c"
+        "../font/generated/share_tech_mono_72.c"
     INCLUDE_DIRS
         "."
         "../font/generated"

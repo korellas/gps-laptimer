@@ -38,10 +38,13 @@ extern Page* createWaitGpsPage();
 extern Page* createBleOtaPage();
 extern Page* createSettingsPage();
 extern Page* createGpsStatusPage();
+extern Page* createImuPage();
 extern Page* createPreTrackPage();
 extern Page* createLaptimerPage();
 extern Page* createEmulationPage();
 extern Page* createTransitionPage();
+extern Page* createLapSummaryPage();
+extern Page* createStorageTestPage();
 
 void initPageSystem()
 {
@@ -51,10 +54,13 @@ void initPageSystem()
     gPageManager.registerPage(createBleOtaPage());
     gPageManager.registerPage(createSettingsPage());
     gPageManager.registerPage(createGpsStatusPage());
+    gPageManager.registerPage(createImuPage());
     gPageManager.registerPage(createPreTrackPage());
     gPageManager.registerPage(createLaptimerPage());
     gPageManager.registerPage(createEmulationPage());
     gPageManager.registerPage(createTransitionPage());
+    gPageManager.registerPage(createLapSummaryPage());
+    gPageManager.registerPage(createStorageTestPage());
 
     // Start on MODE_SELECT
     gPageManager.navigateTo(PageId::MODE_SELECT);

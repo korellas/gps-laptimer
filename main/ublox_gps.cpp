@@ -719,6 +719,25 @@ configure_rate:
         }
     }
 
-    ESP_LOGI(TAG, "GPS module configured: %d baud, 10Hz, Automotive", UBLOX_BAUD_TARGET);
+    // ─── GNSS 컨스텔레이션 설정: GPS + GLO + GAL (BDS 비활성) ───
+    {
+        CfgKeyValue gnssCfg[] = {
+            { 0x1031001F, 1, 1 },   // CFG-SIGNAL-GPS_ENA = enable
+            { 0x10310021, 1, 1 },   // CFG-SIGNAL-GAL_ENA = enable
+            { 0x10310025, 1, 1 },   // CFG-SIGNAL-GLO_ENA = enable
+            { 0x10310022, 0, 1 },   // CFG-SIGNAL-BDS_ENA = disable
+        };
+
+        ESP_LOGI(TAG, "  Setting GNSS: GPS+GAL+GLO (BDS disabled)...");
+        if (sendCfgValset(gnssCfg, 4, 0x01)) {
+            if (waitForAck(1000)) {
+                ESP_LOGI(TAG, "  GNSS config ACK received");
+            } else {
+                ESP_LOGW(TAG, "  GNSS config no ACK (module may still apply)");
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "GPS module configured: %d baud, 10Hz, Automotive, GPS+GAL+GLO", UBLOX_BAUD_TARGET);
     return true;
 }

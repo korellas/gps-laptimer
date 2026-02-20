@@ -68,6 +68,11 @@ struct PreTrackPrev {
 };
 static PreTrackPrev s_preTrackPrev[BUILTIN_TRACK_COUNT];
 
+// 저속 세션 종료 타이머
+static unsigned long s_lowSpeedStartMs = 0;
+static constexpr float   SESSION_END_MAX_SPEED_KMH = 20.0f;
+static constexpr unsigned long SESSION_END_DURATION_MS = 3000; // 3초 지속 시 종료
+
 // ============================================================
 // HELPER: millis()
 // ============================================================
@@ -179,6 +184,7 @@ void initializeGPSMode() {
     // 세션 상태 초기화 (트랙 감지는 processRealGPS()의 PRE_TRACK 상태에서)
     s_sessionState = GPSSessionState::PRE_TRACK;
     s_sectorBoundaryCount = 0;
+    s_lowSpeedStartMs = 0;
     for (auto& p : s_preTrackPrev) p = {};
     resetTrackManager();
 
@@ -193,6 +199,11 @@ void initializeGPSMode() {
 
     // Sensor Fusion 초기화 (축 캘리브레이션 로드)
     axisCalibInit();
+    if (gApp.imuCalibration.calibrated) {
+        axisCalibSetGravity(gApp.imuCalibration.gravityX,
+                            gApp.imuCalibration.gravityY,
+                            gApp.imuCalibration.gravityZ);
+    }
     if (axisCalibLoad()) {
         ESP_LOGI(TAG, "Sensor fusion: loaded calibration (residual=%.3f)",
                  axisCalibGetResidual());
@@ -219,6 +230,7 @@ void resetRealGPS() {
 
     s_sessionState = GPSSessionState::PRE_TRACK;
     s_sectorBoundaryCount = 0;
+    s_lowSpeedStartMs = 0;
     for (auto& p : s_preTrackPrev) p = {};
 
     resetCrossingState();
@@ -234,9 +246,10 @@ void resetRealGPS() {
     gApp.fusionActive = false;
     gApp.fusionInDR = false;
 
-    // 세션 CSV 닫기
+    // 세션 CSV 및 디버그 로그 닫기
     sdSessionEnd();
     sdLogEvent(0, "GPS_MODE", "RESET");
+    sdLoggerClose();  // flush + close debug log so all GPS data reaches disk
 
     ESP_LOGI(TAG, "GPS mode reset → PRE_TRACK");
 }
@@ -359,12 +372,12 @@ void processRealGPS() {
                                          track->name, layout->name);
                                 sdLogEvent(now, "TRACK", track->name);
 
-                                // 트랙별 베스트 랩 로드
-                                if (loadReferenceLapFromStorage()) {
-                                    gApp.hasValidReferenceLap = true;
-                                    ESP_LOGI(TAG, "Best lap loaded for %s/%s",
-                                             track->id, layout->id);
-                                }
+                                // 레퍼런스 랩은 세션 내 첫 랩 완료 후 자동 설정됨
+                                // (스토리지에서 로드하지 않음 — 당일 세션 베스트만 사용)
+                                gApp.hasValidReferenceLap = false;
+                                gApp.bestLapTimeMs = UINT32_MAX;
+                                gApp.sessionLapCount = 0;
+                                ESP_LOGI(TAG, "Session start: ref lap reset (in-session best only)");
 
                                 startSession(now);
                                 unsigned long lapTimeMs = 0;
@@ -434,7 +447,28 @@ void processRealGPS() {
                         sdLogEvent(now, "LAP_COMPLETE", lapMsg);
                         onLapComplete(lapTimeMs);
                         gpsState.lapStartMs = now;
+                        s_lowSpeedStartMs = 0;  // 랩 완료 시 저속 타이머 리셋
                         ESP_LOGI(TAG, "New lap started");
+                    }
+                }
+
+                // ─── 저속 세션 종료 감지 ───
+                // 완료된 랩이 1개 이상이고, 속도가 20km/h 미만으로 3초 지속 시 서머리 표시
+                if (gApp.sessionLapCount > 0) {
+                    if (point.speedKmh < SESSION_END_MAX_SPEED_KMH) {
+                        if (s_lowSpeedStartMs == 0) {
+                            s_lowSpeedStartMs = now;
+                        } else if ((now - s_lowSpeedStartMs) >= SESSION_END_DURATION_MS) {
+                            ESP_LOGI(TAG, "SESSION_ENDING: speed=%.1f km/h for %lums → summary",
+                                     point.speedKmh, (unsigned long)(now - s_lowSpeedStartMs));
+                            cancelRecording();
+                            sdSessionEnd();
+                            sdLogEvent(now, "SESSION", "END_LOWSPEED");
+                            s_sessionState = GPSSessionState::SESSION_ENDING;
+                            s_lowSpeedStartMs = 0;
+                        }
+                    } else {
+                        s_lowSpeedStartMs = 0;
                     }
                 }
 
@@ -467,6 +501,11 @@ void processRealGPS() {
                 gotNewData = true;
                 break;
             }
+
+            case GPSSessionState::SESSION_ENDING:
+                // 페이지 전환 대기 중 — 처리 없음
+                break;
+
             } // end switch
             exit_state_machine:;
         }
@@ -564,5 +603,5 @@ GPSSessionState getGPSSessionState() {
 }
 
 bool isGPSPreSession() {
-    return s_sessionState != GPSSessionState::SESSION_ACTIVE;
+    return s_sessionState == GPSSessionState::PRE_TRACK;
 }

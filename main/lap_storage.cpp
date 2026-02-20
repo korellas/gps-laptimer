@@ -58,6 +58,7 @@ static struct {
     uint16_t lapId;
     uint32_t startTimestamp;
     float maxSpeedKmh;
+    float minSpeedKmh;
     float totalSpeed;
     uint8_t trackIndex;
     uint8_t layoutIndex;
@@ -443,6 +444,7 @@ void startRecordingLap(uint16_t sessionId, uint16_t lapId,
     s_recording.lapId = lapId;
     s_recording.startTimestamp = (uint32_t)time(nullptr);
     s_recording.maxSpeedKmh = 0;
+    s_recording.minSpeedKmh = 9999.0f;
     s_recording.totalSpeed = 0;
     s_recording.trackIndex = trackIndex;
     s_recording.layoutIndex = layoutIndex;
@@ -471,6 +473,9 @@ void addPointToRecording(double lat, double lng, unsigned long lapTimeMs,
     if (speedKmh > s_recording.maxSpeedKmh) {
         s_recording.maxSpeedKmh = speedKmh;
     }
+    if (speedKmh > 1.0f && speedKmh < s_recording.minSpeedKmh) {
+        s_recording.minSpeedKmh = speedKmh;
+    }
     s_recording.totalSpeed += speedKmh;
 }
 
@@ -484,6 +489,7 @@ bool finishRecordingLap(StorableLap& outLap) {
     outLap.totalTimeMs = outLap.points.back().lapTimeMs;
     outLap.startTimestamp = s_recording.startTimestamp;
     outLap.maxSpeedKmh = s_recording.maxSpeedKmh;
+    outLap.minSpeedKmh = (s_recording.minSpeedKmh < 9998.0f) ? s_recording.minSpeedKmh : 0.0f;
     outLap.avgSpeedKmh = s_recording.totalSpeed / outLap.points.size();
     outLap.sessionId = s_recording.sessionId;
     outLap.lapId = s_recording.lapId;

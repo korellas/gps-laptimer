@@ -395,6 +395,102 @@ static esp_err_t handleOtaStatus(httpd_req_t *req)
 // SD 카드 파일 브라우저
 // ============================================================
 
+static const char* humanSize(long bytes, char* buf, int bufLen);  // forward decl
+
+// GET /spiffs → SPIFFS 파일 목록 (읽기 전용, 다운로드 없음)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+static esp_err_t handleSpiffsList(httpd_req_t *req)
+{
+    updateActivity();
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+
+    char buf[300];
+
+    // HTML 헤더
+    httpd_resp_sendstr_chunk(req,
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>SPIFFS</title>"
+        "<style>"
+        "body{font-family:monospace;background:#111;color:#eee;padding:16px;margin:0}"
+        "a{color:#4af;text-decoration:none}a:hover{text-decoration:underline}"
+        ".nav{margin-bottom:12px}"
+        ".row{display:flex;padding:6px 0;border-bottom:1px solid #333}"
+        ".row:hover{background:#1a1a2e}"
+        ".name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}"
+        ".size{width:80px;text-align:right;color:#888;flex-shrink:0}"
+        ".info{color:#888;margin-bottom:12px}"
+        "h2{color:#4af;margin:8px 0 4px}"
+        "</style></head><body>");
+
+    // 네비게이션
+    httpd_resp_sendstr_chunk(req,
+        "<div class='nav'>"
+        "<a href='/'>Log</a> &middot; "
+        "<a href='/settings'>Settings</a> &middot; "
+        "<a href='/ota'>Update</a> &middot; "
+        "<a href='/files'>SD</a> &middot; "
+        "<b>SPIFFS</b>"
+        "</div>");
+
+    httpd_resp_sendstr_chunk(req, "<h2>SPIFFS Files</h2>");
+
+    // SPIFFS 사용량
+    size_t total = 0, used = 0;
+    if (esp_spiffs_info(nullptr, &total, &used) == ESP_OK) {
+        char totalBuf[16], usedBuf[16], freeBuf[16];
+        humanSize((long)total, totalBuf, sizeof(totalBuf));
+        humanSize((long)used, usedBuf, sizeof(usedBuf));
+        humanSize((long)(total - used), freeBuf, sizeof(freeBuf));
+        snprintf(buf, sizeof(buf),
+                 "<div class='info'>Total: %s &middot; Used: %s &middot; Free: %s (%.0f%%)</div>",
+                 totalBuf, usedBuf, freeBuf,
+                 100.0 * (total - used) / (total > 0 ? total : 1));
+        httpd_resp_sendstr_chunk(req, buf);
+    } else {
+        httpd_resp_sendstr_chunk(req, "<p style='color:#f44'>SPIFFS not mounted</p></body></html>");
+        return httpd_resp_sendstr_chunk(req, nullptr);
+    }
+
+    // 파일 목록
+    DIR* dir = opendir("/spiffs");
+    if (!dir) {
+        httpd_resp_sendstr_chunk(req, "<p>Cannot open /spiffs</p></body></html>");
+        return httpd_resp_sendstr_chunk(req, nullptr);
+    }
+
+    int fileCount = 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_name[0] == '.') continue;
+
+        char entryPath[160];
+        snprintf(entryPath, sizeof(entryPath), "/spiffs/%s", entry->d_name);
+
+        struct stat st = {};
+        stat(entryPath, &st);
+
+        char szBuf[16];
+        humanSize((long)st.st_size, szBuf, sizeof(szBuf));
+        snprintf(buf, sizeof(buf),
+                 "<div class='row'><span class='name'>%s</span>"
+                 "<span class='size'>%s</span></div>",
+                 entry->d_name, szBuf);
+        httpd_resp_sendstr_chunk(req, buf);
+        fileCount++;
+    }
+    closedir(dir);
+
+    if (fileCount == 0) {
+        httpd_resp_sendstr_chunk(req, "<p style='color:#888'>No files</p>");
+    }
+
+    httpd_resp_sendstr_chunk(req, "</body></html>");
+    return httpd_resp_sendstr_chunk(req, nullptr);
+}
+#pragma GCC diagnostic pop
+
 // GET /files?d=/path  → SD 카드 폴더 탐색 + 파일 다운로드
 // d= 파라미터 없으면 루트(/) 표시, 폴더 클릭으로 탐색, 파일 클릭으로 다운로드
 #pragma GCC diagnostic push
@@ -461,7 +557,9 @@ static esp_err_t handleFileList(httpd_req_t *req)
         "<div class='nav'>"
         "<a href='/'>Log</a> &middot; "
         "<a href='/settings'>Settings</a> &middot; "
-        "<a href='/ota'>Update</a>"
+        "<a href='/ota'>Update</a> &middot; "
+        "<b>SD</b> &middot; "
+        "<a href='/spiffs'>SPIFFS</a>"
         "</div>");
 
     // 현재 경로 표시
@@ -621,7 +719,7 @@ static esp_err_t handleFavicon(httpd_req_t *req)
 static void initHttpServer(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = ENABLE_LIVE_LOG_WS ? 14 : 13;
+    config.max_uri_handlers = ENABLE_LIVE_LOG_WS ? 15 : 14;
     config.max_open_sockets = 2;  // 내부 RAM 절약
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 4096;
@@ -746,6 +844,18 @@ static void initHttpServer(void)
         .supported_subprotocol = nullptr
     };
     httpd_register_uri_handler(s_httpServer, &uri_ota_status);
+
+    // SPIFFS 파일 브라우저
+    httpd_uri_t uri_spiffs = {
+        .uri = "/spiffs",
+        .method = HTTP_GET,
+        .handler = handleSpiffsList,
+        .user_ctx = nullptr,
+        .is_websocket = false,
+        .handle_ws_control_frames = false,
+        .supported_subprotocol = nullptr
+    };
+    httpd_register_uri_handler(s_httpServer, &uri_spiffs);
 
     // SD 카드 파일 브라우저
     httpd_uri_t uri_files = {

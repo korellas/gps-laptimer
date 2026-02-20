@@ -27,8 +27,9 @@
  * automatically identified and session begins.
  */
 enum class GPSSessionState {
-    PRE_TRACK,      // 피니시라인 통과 대기 — 속도+시각 표시
-    SESSION_ACTIVE  // 레이싱 중 (연속 랩 타이밍)
+    PRE_TRACK,       // 피니시라인 통과 대기 — 속도+시각 표시
+    SESSION_ACTIVE,  // 레이싱 중 (연속 랩 타이밍)
+    SESSION_ENDING   // 저속 감지 → 랩 서머리 페이지 대기
 };
 
 // ============================================================

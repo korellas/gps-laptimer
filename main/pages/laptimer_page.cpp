@@ -33,8 +33,10 @@ struct LaptimerPage : Page {
     }
 
     void onTick() override {
-        // If session drops back to PRE_TRACK (e.g., GPS reset), return to pre-track page
-        if (getGPSSessionState() != GPSSessionState::SESSION_ACTIVE) {
+        GPSSessionState st = getGPSSessionState();
+        if (st == GPSSessionState::SESSION_ENDING) {
+            gPageManager.navigateTo(PageId::LAP_SUMMARY);
+        } else if (st != GPSSessionState::SESSION_ACTIVE) {
             gPageManager.navigateTo(PageId::PRE_TRACK);
         }
     }

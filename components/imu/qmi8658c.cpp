@@ -306,12 +306,20 @@ bool imuCalibrate(int numSamples)
     // 가장 큰 절대값을 가진 축을 중력축으로 판별 → 1g 보정
     float absX = fabsf(medAx), absY = fabsf(medAy), absZ = fabsf(medAz);
 
+    // 중력 벡터 초기화 (캘리브 후 정지 시 읽히는 값 = gravity)
+    s_calibration.gravityX = 0.0f;
+    s_calibration.gravityY = 0.0f;
+    s_calibration.gravityZ = 0.0f;
+
     if (absZ >= absX && absZ >= absY) {
         s_calibration.accelOffsetZ = medAz - (medAz > 0 ? 1.0f : -1.0f);
+        s_calibration.gravityZ = (medAz > 0) ? 1.0f : -1.0f;
     } else if (absY >= absX && absY >= absZ) {
         s_calibration.accelOffsetY = medAy - (medAy > 0 ? 1.0f : -1.0f);
+        s_calibration.gravityY = (medAy > 0) ? 1.0f : -1.0f;
     } else {
         s_calibration.accelOffsetX = medAx - (medAx > 0 ? 1.0f : -1.0f);
+        s_calibration.gravityX = (medAx > 0) ? 1.0f : -1.0f;
     }
 
     s_calibration.gyroOffsetX = medianOf(bufGx, validCount);

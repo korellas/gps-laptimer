@@ -2,8 +2,8 @@
  * @file mode_select_page.cpp
  * @brief Startup mode selection page.
  *
- * Cycles through 5 modes via swipe left/right:
- *   0=LAPTIMER, 1=EMULATION, 2=GPS STATUS, 3=BLE OTA, 4=SETTINGS
+ * Cycles through 7 modes via swipe left/right:
+ *   0=LAPTIMER, 1=EMULATION, 2=GPS STATUS, 3=BLE OTA, 4=SETTINGS, 5=SD TEST, 6=IMU STATUS
  * Tap to confirm. Swipe up for phone plate.
  * Auto-enter LAPTIMER if speed > 50 km/h.
  */
@@ -67,13 +67,13 @@ struct ModeSelectPage : Page {
     void onGesture(Gesture g) override {
         if (g == Gesture::SWIPE_LEFT || g == Gesture::SWIPE_RIGHT) {
             if (g == Gesture::SWIPE_LEFT) {
-                modeIndex = (modeIndex + 1) % 5;
+                modeIndex = (modeIndex + 1) % 7;
             } else {
-                modeIndex = (modeIndex + 4) % 5;
+                modeIndex = (modeIndex + 6) % 7;
             }
             if (modeIndex == 1) {
                 selectedMode = GPSMode::SIMULATION;
-            } else if (modeIndex != 3 && modeIndex != 4) {
+            } else if (modeIndex != 3 && modeIndex != 4 && modeIndex != 5 && modeIndex != 6) {
                 selectedMode = GPSMode::GPS_HARDWARE;
             }
             updateModeLabel();
@@ -95,6 +95,8 @@ private:
             {"< GPS STATUS >", 0xFF, 0xCC, 0x00},
             {"< BLE OTA >",    0x00, 0x88, 0xFF},
             {"< SETTINGS >",   0xFF, 0x88, 0x00},
+            {"< SD TEST >",    0xFF, 0x44, 0x44},
+            {"< IMU STATUS >", 0x88, 0xFF, 0x88},
         };
         const auto& m = modes[modeIndex];
         if (lvglLock(10)) {
@@ -106,10 +108,10 @@ private:
     }
 
     void confirmMode() {
-        const char* modeNames[] = {"LAPTIMER", "EMULATION", "GPS STATUS", "BLE OTA", "SETTINGS"};
+        const char* modeNames[] = {"LAPTIMER", "EMULATION", "GPS STATUS", "BLE OTA", "SETTINGS", "SD TEST", "IMU STATUS"};
         ESP_LOGI(TAG, "Mode selected: %s", modeNames[modeIndex]);
 
-        if (modeIndex != 3 && modeIndex != 4) {
+        if (modeIndex != 3 && modeIndex != 4 && modeIndex != 5 && modeIndex != 6) {
             gApp.currentGpsMode = selectedMode;
         }
 
@@ -122,6 +124,10 @@ private:
                 lv_label_set_text(getStartupStatusLabel(), "BLE OTA");
             } else if (modeIndex == 4) {
                 lv_label_set_text(getStartupStatusLabel(), "SETTINGS");
+            } else if (modeIndex == 5) {
+                lv_label_set_text(getStartupStatusLabel(), "SD TEST");
+            } else if (modeIndex == 6) {
+                lv_label_set_text(getStartupStatusLabel(), "IMU STATUS");
             }
             lvglUnlock();
         }
@@ -143,6 +149,12 @@ private:
                 break;
             case 4:  // SETTINGS
                 gPageManager.navigateTo(PageId::SETTINGS);
+                break;
+            case 5:  // SD TEST
+                gPageManager.navigateTo(PageId::STORAGE_TEST);
+                break;
+            case 6:  // IMU STATUS
+                gPageManager.navigateTo(PageId::IMU_STATUS);
                 break;
         }
     }

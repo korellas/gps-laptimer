@@ -1,6 +1,9 @@
 # GPS Laptimer - ESP-IDF Configuration
 # Waveshare ESP32-S3-Touch-LCD-3.49
 
+# FAT Filesystem — Long File Name support (required for date-based log filenames)
+CONFIG_FATFS_LFN_HEAP=y
+
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 

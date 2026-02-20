@@ -197,6 +197,16 @@ DeltaResult calculateDelta(const GPSPoint& current, const LapData& reference,
 
             float dist = fastDistanceMetersPrecomp(current.lat, current.lng, projLat, projLng, cosLat);
 
+            // 방향 체크: 현재 헤딩과 레퍼런스 세그먼트 방향이 90° 이상 차이나면
+            // 150m 가산 패널티 → 겹치는 트랙 구간에서 반대 방향 매칭 방지
+            if (current.headingDeg >= 0.0f && p1.headingDeg >= 0.0f) {
+                float angleDiff = fabsf(current.headingDeg - p1.headingDeg);
+                if (angleDiff > 180.0f) angleDiff = 360.0f - angleDiff;
+                if (angleDiff > 90.0f) {
+                    dist += 150.0f;
+                }
+            }
+
             if (dist < minDistanceM) {
                 minDistanceM = dist;
                 bestSegmentStart = i;
