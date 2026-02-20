@@ -119,8 +119,8 @@ waveshare_display.cpp (2,506 lines)
  * @brief Hardware Abstraction Layer for Waveshare ESP32-S3-Touch-LCD-3.49
  *
  * LCD panel, touch, backlight, LVGL infrastructure, I2C bus, power control.
- * 기본 전략: waveshare_display.h 경유 include로 하위호환 유지,
- * HAL-only 콜사이트는 필요 시 direct include로 점진 전환.
+ * main/ 전용 헤더 — components/ 에서는 include 불가 (섹션 4.4 참조).
+ * page 구현체들은 display_widgets.h 경유로 HAL API 접근.
  */
 
 #pragma once
@@ -374,26 +374,25 @@ void systemPowerOff(void);
 
 UI 코드에서 `lvgl_mutex`를 직접 사용하는 곳을 모두 `lvglLock()`/`lvglUnlock()`으로 교체:
 
-| 함수 | 현재 패턴 | 변경 후 |
+| 함수 | 현재 패턴 (grep 검증값) | 변경 후 |
 |------|-----------|---------|
-| `setupUI()` | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
-| `updateLapData()` | `lvgl_lock(10)` / `lvgl_unlock()` × **5곳** (L1165,1182,1355,1379,1524) | `lvglLock(10)` / `lvglUnlock()` |
-| `updateGpsStatusPage()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50))` | `lvglLock(50)` |
-| `showNotification()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100))` | `lvglLock(100)` |
-| `updateNotification()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(30))` | `lvglLock(30)` |
-| `updateBatteryWarning()` | `lvgl_lock(10)` / `lvgl_unlock()` × **2쌍** (L2075+2082, L2095+2097) | `lvglLock(10)` / `lvglUnlock()` |
-| `applyPageVisibilityForPage()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100))` | `lvglLock(100)` |
-| `updateLapSummaryDisplay()` | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50))` | `lvglLock(50)` |
-| `updateImuDisplay()` | `lvglLock(50)` / `lvglUnlock()` | 이미 OK (공개 API 사용 중) |
-| `createStartupScreen()` | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
-| `displayTest()` | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
+| `setupUI()` (L789) | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
+| `updateLapData()` (L1165+1182) | `lvgl_lock(10)` / `lvgl_unlock()` — 구역 1 | `lvglLock(10)` / `lvglUnlock()` |
+| `updateLapData()` (L1355+1379+1524) | `lvgl_lock(10)` → 2개 unlock 경로 — 구역 2 | `lvglLock(10)` / `lvglUnlock()` (2곳) |
+| `showNotification()` (L1564) | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(10))` | `lvglLock(10)` |
+| `updateNotification()` (L1582) | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(10))` | `lvglLock(10)` |
+| `createStartupScreen()` (L1674) | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
+| `updateGpsStatusPage()` (L1952) | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(10))` | `lvglLock(10)` |
+| `displayTest()` (L2014) | `xSemaphoreTake(lvgl_mutex, portMAX_DELAY)` | `lvglLock(-1)` |
+| `updateBatteryWarning()` (L2075+2082, L2095+2097) | `lvgl_lock(10)` / `lvgl_unlock()` × 2쌍 | `lvglLock(10)` / `lvglUnlock()` (각 쌍) |
+| `applyPageVisibilityForPage()` (L2150) | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(100))` | `lvglLock(100)` |
+| `updateLapSummaryDisplay()` (L2279) | `xSemaphoreTake(lvgl_mutex, pdMS_TO_TICKS(50))` | `lvglLock(50)` |
+| `setGpsStatusLine()` (L2249+2251) | `lvglLock(10)` / `lvglUnlock()` | 이미 OK |
+| `updateImuDisplay()` (L2490+2504) | `lvglLock(10)` / `lvglUnlock()` | 이미 OK |
 
-> ⚠️ **이전 버전 오류 수정**: `updateLapData()` 행이 "이미 OK"로 기술되어 있었으나 틀렸다.
-> `lvgl_lock()`은 `display_hal.cpp`로 이동 시 **static** 함수가 되므로 `waveshare_display.cpp`에서
-> 접근 불가. L1165/1182/1355/1379/1524 5곳 모두 `lvglLock()` / `lvglUnlock()` 교체 필수.
-> `updateBatteryWarning()`도 lock 쌍이 2개임을 확인 (L2075+2082, L2095+2097).
-
-**요약**: 총 ~18개 호출점. `lvgl_lock()` / `lvgl_unlock()` (static internal) 패턴 + `xSemaphoreTake(lvgl_mutex, ...)` 패턴 모두 `lvglLock()` / `lvglUnlock()` 공개 API로 교체.
+**요약**: ~25개 라인 변경 (lock/unlock 양쪽 포함). 패턴 2종:
+- `lvgl_lock(n)` / `lvgl_unlock()` → `lvglLock(n)` / `lvglUnlock()` (static 접근 불가)
+- `xSemaphoreTake(lvgl_mutex, ...)` + 대응 `xSemaphoreGive(lvgl_mutex)` → `lvglLock(n)` / `lvglUnlock()`
 
 ### 4.7 `detectGesture()` 터치 접근 수정
 
@@ -447,8 +446,8 @@ static GestureResult detectGesture() {
 | `main/main.cpp` | `initPowerLatch()`, `initDisplay()`, `getSensorI2CBus()`, `systemPowerOff()` | `#include "display_hal.h"` 추가 |
 | `main/page_manager.cpp` | `readTouch()`, `setBacklight()`, `systemPowerOff()` | `#include "display_hal.h"` 추가 |
 | `components/modes/gps_processor.cpp` | `setGpsSignalLost()` → 이건 UI이므로 waveshare_display.h에 유지 | 변경 없음 |
-| `main/pages/wait_gps_page.cpp` | `readTouch()` | `#include "display_hal.h"` 추가 (또는 `waveshare_display.h` 경유) |
-| `main/serial_commands.cpp` | `systemPowerOff()` | `#include "display_hal.h"` 추가 (또는 `waveshare_display.h` 경유) |
+| `main/pages/wait_gps_page.cpp` | `readTouch()` | **변경 불필요** — `display_widgets.h` 이미 include 중이며, 4.5에서 display_hal.h 추가 후 readTouch() 자동 노출 |
+| `main/serial_commands.cpp` | `systemPowerOff()` | `#include "display_hal.h"` 직접 추가 필요 — waveshare_display.h가 systemPowerOff 더 이상 미노출 |
 
 **핵심**: `waveshare_display.h`는 `display_hal.h`를 include할 수 없다 (섹션 4.4 참조).
 HAL API를 사용하는 `main/` 파일들은 `display_hal.h`를 직접 include해야 한다.
@@ -470,7 +469,7 @@ Step 2: display_hal.cpp 생성 (waveshare_display.cpp에서 HAL 영역 이동)
 Step 3: waveshare_display.cpp 정리
         - 이동된 코드 삭제
         - #include 정리 (HAL 드라이버 헤더 제거, display_hal.h 추가)
-        - lvgl_mutex 직접 접근 → lvglLock/Unlock 교체 (~10곳)
+        - lvgl_mutex 직접 접근 → lvglLock/Unlock 교체 (~25 라인, 섹션 4.6 표 참조)
         - detectGesture() → readTouchXY() 사용
 Step 4: components/common/include/waveshare_display.h 수정
         - HAL API 선언 제거 (display_hal.h include 없이 단순 삭제)
@@ -479,10 +478,10 @@ Step 5: display_widgets.h 수정
         - #include "display_hal.h" 추가
 Step 6: main/CMakeLists.txt에 display_hal.cpp 추가
 Step 7: 외부 파일 #include 업데이트
-        - main/main.cpp: display_hal.h 추가 (initPowerLatch, initDisplay 등)
-        - main/page_manager.cpp: display_hal.h 추가 (readTouch, setBacklight 등)
-        - main/pages/wait_gps_page.cpp: display_hal.h 추가 (readTouch)
+        - main/main.cpp: display_hal.h 추가 (initPowerLatch, initDisplay, getSensorI2CBus, systemPowerOff)
+        - main/page_manager.cpp: display_hal.h 추가 (readTouch, setBacklight, systemPowerOff)
         - main/serial_commands.cpp: display_hal.h 추가 (systemPowerOff)
+        ※ main/pages/wait_gps_page.cpp: 변경 불필요 — display_widgets.h 경유 자동 노출
 Step 8: 빌드 검증 (idf.py build)
 Step 9: 커밋
 ```
