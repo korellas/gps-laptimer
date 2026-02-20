@@ -141,6 +141,9 @@ struct TrackLayout {
     int builtinRefEndIdx;       // End index in track_points array
     uint32_t builtinRefTimeMs;  // Reference lap time
     
+    // Minimum speed for finish line crossing (track identification)
+    float minCrossSpeedKmh;     // Minimum GPS speed to trigger crossing (km/h)
+
     // Track length
     float trackLengthM;         // Total track length in meters
     

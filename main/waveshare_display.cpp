@@ -145,6 +145,11 @@ static lv_obj_t *lbl_bat_low = NULL;          // main screen
 static lv_obj_t *lbl_bat_low_startup = NULL;  // startup overlay
 static lv_obj_t *lbl_bat_low_phone = NULL;    // phone overlay
 
+// 배터리 아이콘 (startup overlay)
+static lv_obj_t *bat_icon_body = NULL;
+static lv_obj_t *bat_icon_tip  = NULL;
+static lv_obj_t *bat_icon_fill = NULL;
+
 // 날짜/시간 라벨 (delta 위, 중앙)
 static lv_obj_t *lbl_datetime = NULL;
 
@@ -227,6 +232,7 @@ static struct {
     int32_t lastBarValue = -9999;
     bool lastBarPositive = false;
     int8_t lastLowBat = -1;    // 저전력 글로우 상태 (-1=미설정, 0=off, 1=on)
+    int8_t lastBatIconPct = -1; // 배터리 아이콘 캐시 (-1=미설정)
 } cache;
 
 // ============================================================
@@ -1666,6 +1672,35 @@ void createStartupScreen(void)
     lv_obj_align(lbl_bat_low_startup, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_add_flag(lbl_bat_low_startup, LV_OBJ_FLAG_HIDDEN);
 
+    // 배터리 아이콘 — 오른쪽 상단
+    bat_icon_body = lv_obj_create(startup_overlay);
+    lv_obj_set_size(bat_icon_body, 36, 16);
+    lv_obj_set_pos(bat_icon_body, 594, 6);
+    lv_obj_set_style_bg_opa(bat_icon_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(bat_icon_body, lv_color_white(), 0);
+    lv_obj_set_style_border_width(bat_icon_body, 2, 0);
+    lv_obj_set_style_radius(bat_icon_body, 3, 0);
+    lv_obj_set_style_pad_all(bat_icon_body, 0, 0);
+    lv_obj_clear_flag(bat_icon_body, LV_OBJ_FLAG_SCROLLABLE);
+
+    bat_icon_tip = lv_obj_create(startup_overlay);
+    lv_obj_set_size(bat_icon_tip, 3, 8);
+    lv_obj_set_pos(bat_icon_tip, 630, 10);
+    lv_obj_set_style_bg_color(bat_icon_tip, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(bat_icon_tip, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bat_icon_tip, 0, 0);
+    lv_obj_set_style_radius(bat_icon_tip, 1, 0);
+    lv_obj_clear_flag(bat_icon_tip, LV_OBJ_FLAG_SCROLLABLE);
+
+    bat_icon_fill = lv_obj_create(startup_overlay);
+    lv_obj_set_size(bat_icon_fill, 0, 10);
+    lv_obj_set_pos(bat_icon_fill, 597, 9);
+    lv_obj_set_style_bg_color(bat_icon_fill, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(bat_icon_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bat_icon_fill, 0, 0);
+    lv_obj_set_style_radius(bat_icon_fill, 1, 0);
+    lv_obj_clear_flag(bat_icon_fill, LV_OBJ_FLAG_SCROLLABLE);
+
     // 프로젝트 타이틀: "GPS LAPTIMER" (56pt, 흰색, 중앙)
     startup_title_label = lv_label_create(startup_overlay);
     lv_obj_set_style_text_color(startup_title_label, lv_color_white(), 0);
@@ -2025,6 +2060,22 @@ void updateBatteryWarning(void)
             }
             lvgl_unlock();
             cache.lastLowBat = lowBat;
+        }
+    }
+
+    // 배터리 아이콘 채움 바 업데이트
+    if (bat_icon_fill) {
+        int8_t pct = (gApp.batteryPercent < 0.0f) ? 0
+                   : (gApp.batteryPercent > 100.0f) ? 100
+                   : (int8_t)gApp.batteryPercent;
+        if (pct != cache.lastBatIconPct) {
+            int fillW = (int)(pct * 30 / 100);
+            if (fillW < 0) fillW = 0;
+            if (lvgl_lock(10)) {
+                lv_obj_set_width(bat_icon_fill, fillW);
+                lvgl_unlock();
+            }
+            cache.lastBatIconPct = pct;
         }
     }
 }

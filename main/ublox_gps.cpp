@@ -667,7 +667,7 @@ bool configureUBloxModule() {
         };
 
         ESP_LOGI(TAG, "  Setting baud rate to %d...", UBLOX_BAUD_TARGET);
-        if (!sendCfgValset(baudCfg, 1, 0x01)) {
+        if (!sendCfgValset(baudCfg, 1, 0x03)) {
             ESP_LOGE(TAG, "  Failed to send baud rate config");
             return false;
         }
@@ -702,7 +702,7 @@ configure_rate:
         bool rateConfigured = false;
         for (int attempt = 0; attempt < 3; attempt++) {
             ESP_LOGI(TAG, "  Setting 10Hz rate + Automotive mode (attempt %d)...", attempt + 1);
-            if (sendCfgValset(rateCfg, 3, 0x01)) {
+            if (sendCfgValset(rateCfg, 3, 0x03)) {
                 if (waitForAck(1000)) {
                     ESP_LOGI(TAG, "  Configuration ACK received");
                     rateConfigured = true;
@@ -719,17 +719,17 @@ configure_rate:
         }
     }
 
-    // ─── GNSS 컨스텔레이션 설정: GPS + GLO + GAL (BDS 비활성) ───
+    // ─── GNSS 컨스텔레이션 설정: GPS + GLO + GAL + BDS (전체 활성) ───
     {
         CfgKeyValue gnssCfg[] = {
             { 0x1031001F, 1, 1 },   // CFG-SIGNAL-GPS_ENA = enable
             { 0x10310021, 1, 1 },   // CFG-SIGNAL-GAL_ENA = enable
             { 0x10310025, 1, 1 },   // CFG-SIGNAL-GLO_ENA = enable
-            { 0x10310022, 0, 1 },   // CFG-SIGNAL-BDS_ENA = disable
+            { 0x10310022, 1, 1 },   // CFG-SIGNAL-BDS_ENA = enable
         };
 
-        ESP_LOGI(TAG, "  Setting GNSS: GPS+GAL+GLO (BDS disabled)...");
-        if (sendCfgValset(gnssCfg, 4, 0x01)) {
+        ESP_LOGI(TAG, "  Setting GNSS: GPS+GAL+GLO+BDS (all enabled)...");
+        if (sendCfgValset(gnssCfg, 4, 0x03)) {
             if (waitForAck(1000)) {
                 ESP_LOGI(TAG, "  GNSS config ACK received");
             } else {
@@ -738,6 +738,23 @@ configure_rate:
         }
     }
 
-    ESP_LOGI(TAG, "GPS module configured: %d baud, 10Hz, Automotive, GPS+GAL+GLO", UBLOX_BAUD_TARGET);
+    // ─── NMEA 출력 비활성화 (UBX만 사용, UART 대역폭 확보) ───
+    {
+        CfgKeyValue protCfg[] = {
+            { 0x10740001, 1, 1 },   // CFG-UART1OUTPROT-UBX = enable
+            { 0x10740002, 0, 1 },   // CFG-UART1OUTPROT-NMEA = disable
+        };
+
+        ESP_LOGI(TAG, "  Disabling NMEA output (UBX only)...");
+        if (sendCfgValset(protCfg, 2, 0x03)) {
+            if (waitForAck(1000)) {
+                ESP_LOGI(TAG, "  NMEA disabled, UBX-only mode");
+            } else {
+                ESP_LOGW(TAG, "  NMEA config no ACK");
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "GPS module configured: %d baud, 10Hz, Automotive, GPS+GAL+GLO+BDS, UBX-only", UBLOX_BAUD_TARGET);
     return true;
 }

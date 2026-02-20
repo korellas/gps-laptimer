@@ -102,6 +102,9 @@ static const TrackLayout LAYOUTS[] = {
         everland_reference_5283::REF_TOTAL_TRACK_POINTS - 1,  // builtinRefEndIdx
         everland_reference_5283::ref_lap_boundaries[0].lapTimeMs,  // builtinRefTimeMs
         
+        // Minimum crossing speed
+        60.0f,                      // minCrossSpeedKmh
+
         // Track length (approximate) - 12.88km based on GPS data
         12881.0f                    // trackLengthM
     }
@@ -230,6 +233,9 @@ static const TrackLayout LAYOUTS[] = {
         0,                          // builtinRefEndIdx
         0,                          // builtinRefTimeMs
 
+        // Minimum crossing speed
+        60.0f,                      // minCrossSpeedKmh
+
         // Track length: Inje Speedium 3.908km
         3908.0f                     // trackLengthM
     }
@@ -251,6 +257,74 @@ static const TrackDefinition TRACK = {
 } // namespace inje
 
 // ============================================================
+// TEST TRACK
+// ============================================================
+
+namespace ipark10 {
+
+// Finish line coordinates
+// P1: 37°18'39.66"N 127°05'09.46"E  →  37.311017, 127.085961
+// P2: 37°18'39.35"N 127°05'10.05"E  →  37.310931, 127.086125
+// Line runs NW-SE (~118°), cars cross heading NNE (~28°)
+constexpr double FINISH_LINE_A_LAT = 37.311017;
+constexpr double FINISH_LINE_A_LNG = 127.085961;
+constexpr double FINISH_LINE_B_LAT = 37.310931;
+constexpr double FINISH_LINE_B_LNG = 127.086125;
+
+// Layout definitions
+static const TrackLayout LAYOUTS[] = {
+    {
+        "full",                     // id
+        "Full Course",              // name
+
+        // Finish line
+        {
+            FINISH_LINE_A_LAT,      // lat1
+            FINISH_LINE_A_LNG,      // lng1
+            FINISH_LINE_B_LAT,      // lat2
+            FINISH_LINE_B_LNG,      // lng2
+            350.0f,                 // validHeadingMin (NNE direction, wraps around 0°)
+            60.0f                   // validHeadingMax
+        },
+
+        // Lap time validation (test track: generous limits)
+        10000,                      // minLapTimeMs (10 seconds)
+        600000,                     // maxLapTimeMs (10 minutes)
+
+        // No sectors
+        0,                          // sectorCount
+        nullptr,                    // sectors
+
+        // No built-in reference lap
+        false,                      // hasBuiltinReference
+        0,                          // builtinRefStartIdx
+        0,                          // builtinRefEndIdx
+        0,                          // builtinRefTimeMs
+
+        // Minimum crossing speed (walking speed for testing)
+        2.0f,                       // minCrossSpeedKmh
+
+        // Track length unknown
+        0.0f                        // trackLengthM
+    }
+};
+
+static constexpr int LAYOUT_COUNT = sizeof(LAYOUTS) / sizeof(LAYOUTS[0]);
+
+// Track definition
+static const TrackDefinition TRACK = {
+    "ipark10",                      // id
+    "iPark 10",                     // name
+    "KR",                           // country
+
+    // Layouts
+    LAYOUT_COUNT,                   // layoutCount
+    LAYOUTS                         // layouts
+};
+
+} // namespace ipark10
+
+// ============================================================
 // BUILT-IN TRACKS REGISTRY
 // ============================================================
 
@@ -262,6 +336,7 @@ static const TrackDefinition TRACK = {
 static const TrackDefinition* const BUILTIN_TRACKS[] = {
     &everland::TRACK,
     &inje::TRACK,
+    &ipark10::TRACK,
     // Add more tracks here:
     // &taebaek::TRACK,
 };

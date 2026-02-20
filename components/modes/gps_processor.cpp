@@ -341,7 +341,7 @@ void processRealGPS() {
                 //  3) setFinishLineFromDefinition()은 교차 감지 성공 후 1회만 호출
                 //  4) prev 갱신은 체크 이후 (속도 조건 외부)에서 항상 수행 →
                 //     속도 임계값 재진입 시 직전 GPS 포인트가 항상 유효하게 유지됨
-                if (point.speedKmh >= SESSION_START_MIN_SPEED_KMH) {
+                {
                     for (int ti = 0; ti < BUILTIN_TRACK_COUNT; ti++) {
                         const TrackDefinition* track = BUILTIN_TRACKS[ti];
                         PreTrackPrev& prev = s_preTrackPrev[ti];
@@ -350,6 +350,7 @@ void processRealGPS() {
                         for (int li = 0; li < track->layoutCount; li++) {
                             const TrackLayout* layout = track->getLayout(li);
                             if (!layout || !layout->finishLine.isConfigured()) continue;
+                            if (point.speedKmh < layout->minCrossSpeedKmh) continue;
                             const FinishLineDefinition& fl = layout->finishLine;
 
                             // 베어링 체크 (인라인 — 전역 crossing state 불변)

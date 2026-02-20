@@ -2,6 +2,8 @@
 
 작성일: 2026-02-18
 2차 리뷰: 2026-02-20
+3차 리뷰 코멘트: 2026-02-20
+4차 리뷰 코멘트: 2026-02-20
 대상: `main/`, `components/` 전반
 목적: 리팩터링 우선순위 확정 및 실행 기준 정리
 
@@ -227,6 +229,18 @@
   - `main/waveshare_display.cpp` (L2345-2352: LVGL에서 imuData 읽기)
 - 제안: `SemaphoreHandle_t` 뮤텍스로 센서 퓨전 필드 보호, 또는 큐 기반으로 imuTask→메인 태스크 단방향 전달
 
+> **[3차 리뷰 코멘트 — 2026-02-20]**
+> 사실관계 보정 필요. 문서의 "LVGL task(core 0)가 `gApp.imuData`를 직접 읽는다" 표현은 부정확하며, 실제 읽기 경로는 `main_task`(core 1) 기준 `PageManager::update()` → `ImuPage::onUpdate()` → `updateImuDisplay()`임.
+> 다만 이슈 자체(동기화 없는 공유 접근)는 여전히 유효함 (`imuTask` write vs `main_task` read). 우선순위는 Critical 유지 가능.
+
+> **[4차 리뷰 코멘트 — 2026-02-20]**
+> 3차 코멘트 검증 완료, **정확함**. 경로 확인:
+> - LVGL task (`lvgl_port_task`, core 0, `waveshare_display.cpp:771`) — `lv_timer_handler()`만 호출, `gApp` 직접 접근 없음
+> - `main_task` (core 1, `main.cpp:935`, `MAIN_TASK_CORE=1`) — `gPageManager.update()` → `ImuPage::onUpdate()` → `updateImuDisplay()` (waveshare_display.cpp:2340)에서 `gApp.imuData.accelX/Y/Z` 읽기
+> - `imuTask` (core 1, `main.cpp:361`) — `gApp.imuData = data` (L315), `gApp.imuData.temperature = temp` (L351) 쓰기
+>
+> **결론**: 크로스 코어(core 0 vs core 1) 레이스가 아니라 **same-core(core 1) 레이스**. ESP32-S3의 same-core 레이스는 FreeRTOS 컨텍스트 스위치 시점에서만 발생하므로 메모리 배리어/캐시 일관성 문제는 없으나, `ImuData` 13개 필드 업데이트 도중 선점당하면 partial read는 여전히 가능. **우선순위 Critical → High로 하향 권장** — same-core라 `portENTER_CRITICAL_ISR` 대신 간단한 `taskENTER_CRITICAL()` 또는 atomic copy로 해결 가능.
+
 ### 9. [High] printf()가 delta_calculator 핫 경로에서 사용
 - 우선순위: High
 - 문제: `delta_calculator.cpp`에 6곳 (L38, 52, 66, 87, 123, 247)에서 `printf()` 사용. 특히 L123의 `[DeltaCalc] Track distance:` 출력은 GPS 업데이트마다 (10Hz) 실행됨.
@@ -234,12 +248,36 @@
 - 근거 파일: `components/timing/delta_calculator.cpp`
 - 제안: 모든 `printf()`를 `ESP_LOGx(TAG, ...)` 로 교체
 
+> **[3차 리뷰 코멘트 — 2026-02-20]**
+> L123 로그는 GPS 10Hz 핫패스가 아니라 reference 누적거리 계산 시점 로그에 가까움. 실시간 영향은 L247 투영 실패 로그(1초 rate-limit)와 `printf`/`ESP_LOGx` 혼용에 더 가깝다.
+> 조치 자체(`printf` → `ESP_LOGx`)는 유지하되 우선순위는 High→Medium 재평가 권장.
+
+> **[4차 리뷰 코멘트 — 2026-02-20]**
+> 3차 코멘트 **정확**. 6개 printf 위치를 전부 확인:
+> - L38: `initDeltaCalculator()` — 1회 (부트)
+> - L52: `setReferenceLap()` — 1회 (empty 체크)
+> - L66: `setReferenceLap()` — 1회 (성공 보고)
+> - L87: `clearReferenceLap()` — 1회 (클리어)
+> - L123: `calculateCumulativeDistances()` — **1회 (레퍼런스 랩 로드 시)**, 10Hz 핫패스 아님
+> - L247: `calculateDelta()` — `s_lastFailLog` 가드로 **최대 1Hz**, 투영 실패 시에만
+>
+> 정상 랩핑 중 `calculateDelta()`의 10Hz 경로에는 printf가 **0개**. High → **Medium 하향 동의**. 조치(`printf` → `ESP_LOGx`)는 코드 품질 일관성 차원에서 여전히 유효.
+
 ### 10. [High] sendCfgValset() 버퍼 오버플로우 체크 위치 오류
 - 우선순위: High
 - 문제: `ublox_gps.cpp` L525에서 payload 경계 체크가 아이템 기록 **후**에 수행됨. 마지막 유효 아이템 시 8바이트 기록으로 `payload[128]` 끝을 1바이트 초과 가능.
 - 현재 호출 사이트에서는 최대 4개 아이템 (36바이트)이라 트리거되지 않지만, 향후 아이템 추가 시 잠재적 버퍼 오버플로우.
 - 근거 파일: `main/ublox_gps.cpp` (L502-532)
 - 제안: 경계 체크를 아이템 기록 **전**으로 이동: `if (pos + 4 + items[i].size > (int)sizeof(payload) - 2)`
+
+> **[3차 리뷰 코멘트 — 2026-02-20]**
+> 현재 호출 패턴(`size` 1/2/4, `count` 최대 4)에서는 즉시 오버플로우 재현 가능성은 낮음.
+> 다만 체크 위치가 쓰기 후인 것은 방어코드 품질 이슈이므로 "확정 크래시 버그"보다 "잠재 결함"으로 표현하는 것이 정확함.
+> 기록 전 경계 체크 + `size` 유효성 검사(1/2/4만 허용) 추가 권장.
+
+> **[4차 리뷰 코멘트 — 2026-02-20]**
+> 3차 코멘트 **동의**. 현재 호출 사이트 확인: 최대 `count=4`, 전부 `size=1`~`4`로 payload 최대 24/128 bytes. 즉시 트리거 불가.
+> `sizeof(payload) - 8` 가드값이 U4 아이템(8 bytes) 기준으로 설계된 것은 맞지만, 쓰기 후 체크는 구조적으로 방어 코드가 아닌 사후 감지. **"잠재 결함" 표현 적절**. High → **Medium 하향**, Phase 1에서 Phase 3으로 이동 권장.
 
 ### 11. [High] getNextSessionId() — uint16_t 오버플로우
 - 우선순위: High
@@ -265,6 +303,16 @@
 - 문제: `wifi_portal.cpp`에서 `static uint8_t otaBuf[4096]` (L324), `static char fileBuf[512]` (L689) 선언. OTA가 미실행 중에도 내부 RAM 4.5KB 상시 점유. `max_open_sockets=2`에서 동시 요청 시 동일 버퍼 공유로 데이터 손상 가능.
 - 근거 파일: `components/wifi_portal/wifi_portal.cpp` (L324, L689)
 - 제안: `malloc()`/`free()`로 교체하여 필요 시에만 할당
+
+> **[3차 리뷰 코멘트 — 2026-02-20]**
+> 상시 RAM 점유(약 4.5KB)는 확정 이슈.
+> "동시 요청 시 데이터 손상"은 서버 실행 모델 근거가 더 필요하므로 가능성 수준으로 낮춰 표현 권장.
+> 메모리 압박 중심으로 볼 때 우선순위는 Medium~High 경계.
+
+> **[4차 리뷰 코멘트 — 2026-02-20]**
+> 3차 코멘트 **검증 완료, 정확**. ESP-IDF `esp_http_server`는 **단일 태스크** 기반 — `httpd_config_t` 기본값으로 내부에서 하나의 FreeRTOS 태스크가 모든 핸들러를 직렬 실행. `max_open_sockets=2`는 TCP 소켓 동시 보유 수이지 핸들러 동시 실행이 아님. `wsBroadcastOnHttpdThread()`도 `httpd_queue_work()`로 같은 태스크에서 실행.
+>
+> **결론**: "동시 요청 시 데이터 손상" 시나리오는 **재현 불가** — 핸들러가 직렬 실행되므로 static 버퍼 경합 없음. 남는 이슈는 **상시 4.5KB RAM 점유**뿐. **High → Medium 하향 확정**. WiFi가 SETTINGS 모드에서만 활성화되므로 실질적 RAM 압박은 WiFi 활성 시에만 발생 — 다만 `static`이라 WiFi 비활성 시에도 RAM을 점유하는 건 사실.
 
 ### 15. [High] handlePostSettings() HTTP 바디 절삭
 - 우선순위: High
@@ -315,32 +363,54 @@
 - 근거 파일: `main/lap_storage.cpp` (L39-49)
 - 제안: 호출자 제공 버퍼 방식 또는 `std::string` 반환으로 변경
 
+### 23. [Medium] 정책 명문화: SPIFFS/SD 동일 이름 충돌 시 SD 우선
+- 우선순위: Medium (정책/운영 일관성)
+- 문제: 동일 트랙명(또는 동일 best-lap 파일명)이 SPIFFS와 SD에 동시에 존재할 때 우선순위 정책이 코드에는 암묵적이나 문서에는 명시되어 있지 않음.
+- 현재 구현 확인: `getLapsDir()`가 `sdcardIsMounted() ? "/sdcard/laps" : "/spiffs/laps"`를 반환하므로, SD 마운트 시 조회/저장은 SD 기준으로 동작.
+- 근거 파일:
+  - `main/lap_storage.cpp` (L35-L37: `getLapsDir`)
+  - `main/lap_storage.cpp` (L373-L390: `loadBestLap`)
+  - `main/lap_storage.cpp` (L330-L370: `saveBestLap`)
+- 제안:
+  1. 문서에 "동일 이름 충돌 시 SD 우선, SD 미마운트 시 SPIFFS fallback" 정책을 명문화
+  2. 테스트 케이스 추가: SD/SPIFFS 동일 파일 존재 상태에서 SD 마운트/언마운트 전환 시 기대 동작 검증
+
+> **[4차 리뷰 코멘트 — 2026-02-20]**
+> 유효한 항목. `getLapsDir()`가 **매 호출마다** `sdcardIsMounted()`를 재평가하므로, 세션 중 SD 언마운트 시 즉시 SPIFFS로 전환됨. 이 때 발생하는 **split state 시나리오**:
+> 1. SD 마운트 상태에서 랩 기록 → `saveBestLap()`이 `/sdcard/laps/best_X_Y.bin`에 저장
+> 2. SD 언마운트 (접촉 불량 등) → 다음 `saveBestLap()`은 `/spiffs/laps/best_X_Y.bin`에 저장
+> 3. SD 재마운트 → `loadBestLap()`은 SD의 구버전을 읽음, SPIFFS의 신버전은 무시
+>
+> 현재 `migrateLegacyLaps()`는 레거시 경로(`/laps/`)에서만 마이그레이션하고, SPIFFS↔SD 간 동기화는 수행하지 않음.
+> **우선순위 Medium 동의**. 정책 문서화 + 부트 시 양쪽 타임스탬프 비교 로직 추가를 검토할 가치 있음.
+
 ## 3. 현재 잘된 부분
 1. 설정 상수가 `config.h`로 중앙화되어 조정 포인트가 명확함.
 2. PageManager 기반 페이지/서브시스템 전환 구조가 비교적 명료함.
 3. 델타 계산의 윈도우 검색 + fallback 전략은 실용적임.
 4. 스토리지 마이그레이션/폴백(legacy 대응) 방향이 현실적임.
 
-## 4. 실행 순서 제안 (2차 리뷰 반영, 2026-02-20)
+## 4. 실행 순서 제안 (4차 리뷰 합의 반영, 2026-02-20)
 
 ### Phase 1: 즉시 패치 (범위 최소, 리스크 낮음)
 - 항목 3: `loadBestLapFromFile` / `loadLap`에 pointCount 상한 검증 + 공통 헬퍼 추출
-- 항목 9: `delta_calculator.cpp`의 `printf()` → `ESP_LOGx()` 교체 (6곳)
+- 항목 9: `delta_calculator.cpp`의 `printf()` → `ESP_LOGx()` 교체 (6곳) — [Medium, 코드 품질]
 - 항목 13: `wifi_portal.cpp`의 `cJSON_PrintUnformatted` NULL 체크 추가 (2곳)
 - 항목 16: `gps_filter.cpp` `smoothPoint()`에 `initialized = true` 추가
 
 ### Phase 2: 단기 안정성 (1-2일)
-- 항목 8: **gApp 레이스 컨디션** — 센서 퓨전 필드에 뮤텍스 적용 (Critical)
+- 항목 8: **gApp same-core 레이스** — `taskENTER_CRITICAL()` 또는 atomic copy 적용 [High]
 - 항목 12: IMU 태스크 핸들 저장
-- 항목 10: `sendCfgValset()` 경계 체크 위치 수정
 - 항목 2: WiFi AP WPA2 패스워드 추가
-- 항목 14: static otaBuf/fileBuf를 동적 할당으로 교체
+- 항목 14: static otaBuf/fileBuf를 동적 할당으로 교체 [Medium, RAM 점유]
 
 ### Phase 3: 기능 개선 (3-5일)
-- 항목 5: `lap_manager` 단계적 축소 (미사용 36개 함수 제거 → simulation.cpp 의존 이전 → 삭제)
+- 항목 5: `lap_manager` 단계적 축소 (미사용 ~36개 함수 제거 → simulation.cpp 의존 이전 → 삭제)
+- 항목 10: `sendCfgValset()` 경계 체크를 쓰기 전으로 이동 + size 유효성 검사 [Medium, 잠재 결함]
 - 항목 11: `getNextSessionId()` 오버플로우 방지
 - 항목 17: `finishRecordingLap()`의 totalTimeMs 정확도 개선
 - 항목 19-20: 파일 I/O 에러 처리 보강 (rename, fread)
+- 항목 23: SPIFFS/SD 정책 문서화 + split state 방지 검토
 
 ### Phase 4: 중기 리팩터링
 - 항목 4: shim 헤더 및 extern 직접 참조 정리
@@ -358,3 +428,4 @@
 5. 델타 계산 경계 케이스(시작점/종료점/빈 레퍼런스) 테스트가 통과한다.
 6. **(신규)** `gApp` 센서 퓨전 필드가 뮤텍스로 보호되어 크로스 코어 레이스 컨디션이 없다.
 7. **(신규)** 모든 파일 I/O 경로에서 에러 핸들링이 완비되어 SPIFFS/SD 손상 시 안전하게 실패한다.
+8. **(신규)** 동일 이름 충돌 시 SD 우선 정책이 문서/테스트로 보장되며, SD 미마운트 시 SPIFFS fallback이 검증된다.
