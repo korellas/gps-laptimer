@@ -181,7 +181,7 @@ constexpr int MAX_REFERENCE_POINTS = 1600;
 constexpr int DISPLAY_ROTATION_DEG = 270;
 
 // Delta bar range in seconds (±)
-constexpr float DELTA_BAR_RANGE_SECONDS = 2.0f;
+constexpr float DELTA_BAR_RANGE_SECONDS = 1.0f;
 
 // Notification default duration
 constexpr unsigned long NOTIFICATION_DEFAULT_MS = 2000;

@@ -676,12 +676,17 @@ void updateLapData(void)
     int fill = (int)(ratio * (float)screen_w);
     if (fill < 0) fill = 0;
     if (fill > screen_w) fill = screen_w;
-    bool showSpeedDelta = (pc.bar == BarMode::SPEED) && hasReference && (faster || slower);
+    bool showBarValue = (pc.bar != BarMode::NONE) && hasReference && (faster || slower);
 
-    // Speed delta 텍스트
+    // Bar value 텍스트 (speed: km/h, time: seconds)
     char speedBuf[24] = "";
-    if (showSpeedDelta) {
-        snprintf(speedBuf, sizeof(speedBuf), "%+.1f", smoothedSpeedDeltaKmh);
+    if (showBarValue) {
+        if (pc.bar == BarMode::SPEED) {
+            snprintf(speedBuf, sizeof(speedBuf), "%+.1f", smoothedSpeedDeltaKmh);
+        } else {
+            float deltaSec = lframe.delta / 1000.0f;
+            snprintf(speedBuf, sizeof(speedBuf), "%+.2f", deltaSec);
+        }
     }
 
     // Sector 데이터 준비
@@ -805,7 +810,7 @@ void updateLapData(void)
     }
 
     // Speed delta text (위치 계산은 lv_obj_get_width 필요하므로 mutex 내부)
-    if (lbl_speed_delta && showSpeedDelta) {
+    if (lbl_speed_delta && showBarValue) {
         if (strcmp(speedBuf, cache.speedDelta) != 0) {
             lv_label_set_text(lbl_speed_delta, speedBuf);
             strcpy(cache.speedDelta, speedBuf);
