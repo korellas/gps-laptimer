@@ -180,27 +180,30 @@ static constexpr float BATTERY_SHUTDOWN_VOLTAGE = 3.5f;
 static constexpr int BATTERY_SHUTDOWN_COUNT = 3;
 static int s_lowVoltageCount = 0;
 
-// 전압(V) → SoC% 변환 (G6EJD 4차 다항식 기반, 3.50~4.15V 범위)
-// Source: G6EJD polynomial for LiPo discharge curve (rescaled)
+// 전압(V) → SoC% 변환 (G6EJD 4차 다항식 기반, 3.50~4.10V 범위)
+// Source: G6EJD polynomial for LiPo discharge curve
+// 원본 다항식(3.524~4.2V)의 출력을 4.1V 기준으로 0-100% 리매핑
 static float voltageToPercent(float voltage)
 {
-    // Clamp at voltage limits
-    if (voltage >= 4.15f) return 100.0f;
+    if (voltage >= 4.1f) return 100.0f;
     if (voltage <= 3.5f) return 0.0f;
 
-    // 4th-order polynomial: percentage = 3285.4083*v⁴ - 50465.9034*v³ + 290122.4621*v² - 739652.5089*v + 705492.4290
+    // Original G6EJD 4th-order polynomial
     float v = voltage;
     float v2 = v * v;
     float v3 = v2 * v;
     float v4 = v3 * v;
 
-    float percentage = 3285.4083f * v4
-                     - 50465.9034f * v3
-                     + 290122.4621f * v2
-                     - 739652.5089f * v
-                     + 705492.4290f;
+    float raw = 2808.3808f * v4
+              - 43560.9157f * v3
+              + 252848.5888f * v2
+              - 650767.4615f * v
+              + 626532.5703f;
 
-    // Clamp result to valid range
+    // poly(4.1) = 90.1787 → remap [0, 90.1787] to [0, 100]
+    constexpr float kMaxRaw = 90.1787f;
+    float percentage = raw * (100.0f / kMaxRaw);
+
     if (percentage < 0.0f) percentage = 0.0f;
     if (percentage > 100.0f) percentage = 100.0f;
 

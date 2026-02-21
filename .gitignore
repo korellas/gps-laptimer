@@ -76,6 +76,9 @@ wheels/
 # bug files
 nul
 
+# Temporary test files
+.tmp_*
+
 # Build logs
 build_log.txt
 cmake_log.txt
